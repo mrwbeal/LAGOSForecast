@@ -1,0 +1,401 @@
+
+This Notebook is used to access SST data 
+
+
+Libraries
+```{r}
+library(ncdf4)
+library(raster)
+library(lubridate)
+library(utilities)
+library(dplyr)
+library(psych)
+library(tabularaster)
+library(maps)
+library(sf)
+```
+
+
+Settings
+
+```{r}
+startyr=1981
+endyr=2020
+months = c("03","04","05","06")
+
+```
+
+
+Extract data from months of interest
+
+```{r}
+
+#Date formatting
+
+
+nc_data <- nc_open('~/Desktop/PhD/Ideas/CSI-master/NIPA_CSI-master_R_compatible/ersst3b_anom.nc')
+print(nc_data)
+
+lon <- ncvar_get(nc_data, "X")
+lat <- ncvar_get(nc_data, "Y", verbose = F)
+t <- ncvar_get(nc_data, "T")
+
+sst.array <- ncvar_get(nc_data, "anom") # store the data in a 3-dimensional array
+dim(sst.array) 
+
+nc_close(nc_data) 
+
+r_brick <- brick(sst.array, xmn=min(lat), xmx=max(lat), ymn=min(lon), ymx=max(lon), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+
+r_brick <- flip(t(r_brick), direction='y')
+
+dates<-as.Date('1960-01-01') %m+% months(as.integer(t))
+names(r_brick) <- dates
+
+years<-which(dates>=as.Date('1981-01-01') & dates<=as.Date('2013-01-01'))
+
+anom.subset<-r_brick[[which(substr(dates,6,7) == months[1] | substr(dates,6,7) == months[2] |substr(dates,6,7) == months[3] |substr(dates,6,7) == months[4])]]
+
+anom.subset<-anom.subset[[which(substr(names(anom.subset),2,5)>=startyr & substr(names(anom.subset),2,5)<=endyr)]]
+
+anom.df<-as.data.frame(anom.subset, xy=T)
+
+grid <- anom.df[,c(1:2)]
+
+years<-unique(substr(colnames(anom.df[,c(3:ncol(anom.df))]),2,5))
+
+for (i in seq(3,ncol(anom.df),by=4)) {
+ grid<-cbind(grid,rowMeans(anom.df[,c(i,i+1,i+2,i+3)]))
+}
+
+names(grid)[c(3:ncol(grid))] <- years
+
+
+sst_grid<-grid[,c(3:ncol(grid))]
+
+sst_grid<-as.data.frame(t(sst_grid))
+sst_grid
+
+world<-is.na(r_brick[[1]])
+plot(world)
+
+```
+
+
+
+```{r SST Grid correlations}
+#Choose NE, MW or ALL
+#wide <- read.csv("/Users/maxbeal/Desktop/PhD/LAGOS_Forecasts/Data/ne_wide.csv")
+wide <- read.csv("/Users/maxbeal/Desktop/PhD/LAGOS_Forecasts/Data/mw_wide.csv")
+#wide <- all_wide
+
+plot(wide[,1],wide[,2], type="b", ylab="chlorophyll-a (ug/L)", xlab="",main="Lake 1")
+
+
+sst_grid$year<-rownames(sst_grid)
+
+cor_hold<-merge(wide[,c(1,2)],sst_grid,by="year")
+#cor_df<-cor(cor_hold[,2],cor_hold[,-c(1:2)], use="pairwise.complete.obs")
+cor<-corr.test(cor_hold[,2],cor_hold[,-c(1:2)], use="pairwise",adjust="none",ci=FALSE)
+pval_df <- data.frame(cor$p)
+cor_df<-data.frame(cor$r)
+
+#cor_df$lagoslakeid[1] = names(cor_hold)[2]
+
+for (i in 3:ncol(wide)) {
+    cor_hold<-merge(wide[,c(1,i)],sst_grid,by="year")
+    #cor<-cor(cor_hold[,2],cor_hold[,-c(1:2)], use="pairwise.complete.obs")
+    cor<-corr.test(cor_hold[,2],cor_hold[,-c(1:2)], use="pairwise",adjust="none",ci=FALSE)
+    cor_df<-data.frame(rbind(cor_df,cor$r))
+    pval_df<-data.frame(rbind(pval_df,cor$p))
+  print(i/ncol(wide)*100)
+}
+
+
+cor_test<-as.matrix(cor_df)
+pval_mat<-as.matrix(pval_df)
+
+cor_test[pval_mat>0.05] = NA
+
+
+data.frame(cor_test)
+max(cor_test,na.rm = T)
+
+sst_grid_xy<-as.data.frame(t(grid))
+
+cor_df_xy<-rbind(sst_grid_xy[c(1:2),],cor_test)
+cor_grid<-data.frame(t(cor_df_xy))
+
+spg <- data.frame(cor_grid)
+spg$x<-as.numeric(spg[,c("x")])
+spg$y<-as.numeric(spg[,c("y")])
+coordinates(spg) <- ~ x + y
+# coerce to SpatialPixelsDataFrame
+gridded(spg) <- TRUE
+# coerce to raster
+rasterDF <- brick(spg)
+rasterDF
+rs<-calc(rasterDF, mean, na.rm=T)
+rs2<-calc(rasterDF, sum, na.rm=T)
+plot(rs,col=topo.colors(100),colNA="light gray")+ plot(world, add=T, col="gray90")
+
+
+rsnum<-rs2/rs
+
+#rs_ne<-rs
+#rs_mw<-rs
+
+#rs_mw_sig <-rs
+#rs_ne_sig <-rs
+
+#plot(rs_ne_sig,col=cm.colors(100),main="NE (sig)",colNA="light gray")
+#plot(rs_mw_sig,col=cm.colors(100),main="MW (sig)",colNA="light gray")
+
+world <- st_as_sf(maps::map("world2", plot = FALSE, fill = TRUE))
+world<-st_crop(world,extent(rsnum))
+
+
+plot(rsnum,col=topo.colors(100),colNA="gray") + plot(world, add=T, col="gray90")
+
+
+plot(rsnum>=20,colNA="light gray",legend=FALSE) + plot(world, add=T, col="gray90")
+
+
+cellplot<-data.frame("cell_cutoff"=NA,"num"=NA)
+for (i in 1:40) {
+  cellplot[i,2]<-cellStats(rsnum>=i,sum)
+  cellplot[i,1] <- i
+}
+
+plot(cellplot$cell_cutoff,cellplot$num, type="b",pch=20, xlab="Number of lakes (cutoff)", ylab="Number SST grids retained", main="Midwest")
+barplot(cellplot$num, names.arg=cellplot$cell_cutoff, cex.names=0.5, xlab="Number of lakes (cutoff)", ylab="Number SST grids retained", main="Midwest")
+
+
+
+spg_sst <- data.frame(grid)
+spg_sst$x<-as.numeric(spg_sst[,c("x")])
+spg_sst$y<-as.numeric(spg_sst[,c("y")])
+coordinates(spg_sst) <- ~ x + y
+# coerce to SpatialPixelsDataFrame
+gridded(spg_sst) <- TRUE
+# coerce to raster
+sst_brick<-brick(spg_sst)
+
+
+#Perform PCA
+sst_pca<-prcomp(t(sst_brick[rsnum>=20]))
+summary(sst_pca)
+
+#Get PCS to save to file
+# sst_predict<-
+#   data.frame("year"=c(1981:2019),
+# "sst_pc1"=sst_pca$x[,1],
+# "sst_pc2"=sst_pca$x[,2],
+# "sst_pc3"=sst_pca$x[,3],
+# "sst_pc4"=sst_pca$x[,4],
+# "sst_pc5"=sst_pca$x[,5],
+# "sst_pc6"=sst_pca$x[,6])
+
+#write.csv(sst_predict,"~/Desktop/NE_SSTgrids_20lakes_19.csv")
+
+#sst_predict<-data.frame("sst_mean"=colMeans(sst_brick[rsnum>12]),"year"=c(1981:2019))
+save<-0
+
+for (j in 1:3) {
+
+#Get PC for correlations
+sst_predict<-data.frame("sst_pca"=sst_pca$x[,j],"year"=c(1981:2019))
+
+cor_df<-data.frame("lagoslakeid"=NA,"pval"=NA,"cor"=NA)
+
+for (i in 2:ncol(wide)) {
+  cor_hold<-merge(wide[,c(1,i)],sst_predict,by="year")
+  cor_hold<-na.omit(cor_hold)
+  cor<-cor.test(cor_hold[,2],cor_hold[,3])
+  cor_df<-rbind(cor_df,c(names(cor_hold[2]),cor$p.value,cor$estimate))
+}
+
+
+
+save<-c(save,cor_df[cor_df$pval<=0.05,1])
+}
+
+cor_df[cor_df$pval<=0.05,]
+
+length(unique(save))-1
+
+(length(unique(save))-1)/(ncol(wide)-1)
+
+
+
+
+plot(rasterDF[[1]],col=topo.colors(50)) + plot(world, add=T, col="gray90")
+plot(rasterDF[[2]],col=topo.colors(50)) + plot(world, add=T, col="gray90")
+plot(rsnum,col=topo.colors(100)) + plot(world, add=T, col="gray90")
+
+
+```
+
+
+```{r}
+sst_predict<-data.frame("sst_pca"=sst_pca$x[,1],"year"=c(1981:2019))
+cor_df<-data.frame("lagoslakeid"=NA,"obs"=NA,"preds"=NA)
+
+for (i in 2:ncol(wide)) {
+  cor_hold<-merge(wide[,c(1,i)],sst_predict,by="year")
+  cor_hold<-na.omit(cor_hold)
+  cor<-lm(cor_hold[,2]~cor_hold[,3])
+  cor_df<-rbind(cor_df,data.frame("lagoslakeid"=names(cor_hold[2]),"obs"=cor_hold[,2],"preds"=cor$fitted.values))
+}
+
+c<-cor.test(cor_df$obs,cor_df$preds)
+plot(cor_df$obs,cor_df$preds,col=as.factor(cor_df$lagoslakeid),pch=20,main="Predictions of MW JASO log(chl-a) using PC2 of MAMJ SST grids",xlab="Observations",ylab="Predictions",text(-1,2,round(c$estimate^2,3)))
+
+round(c$estimate^2,3)
+
+
+```
+
+Look at average timeseries for comparison
+
+```{r AVG timeseries}
+
+#wide <- mean_all
+#wide$cluster_chl<-log(wide$cluster_chl)
+
+wide <- mean_mw
+#wide <- mean_ne
+
+
+
+sst_grid$year<-rownames(sst_grid)
+
+cor_hold<-merge(wide[,c(1,2)],sst_grid,by="year")
+cor<-corr.test(cor_hold[,2],cor_hold[,-c(1:2)], use="pairwise",adjust="none",ci=FALSE)
+pval_df <- data.frame(cor$p)
+cor_df<-data.frame(cor$r)
+
+
+cor_test<-as.matrix(cor_df)
+pval_mat<-as.matrix(pval_df)
+
+cor_test[pval_mat>0.05] = NA
+
+
+data.frame(cor_test)
+max(cor_test,na.rm = T)
+
+sst_grid_xy<-as.data.frame(t(grid))
+
+cor_df_xy<-rbind(sst_grid_xy[c(1:2),],cor_test)
+cor_grid<-data.frame(t(cor_df_xy))
+
+spg <- data.frame(cor_grid)
+spg$x<-as.numeric(spg[,c("x")])
+spg$y<-as.numeric(spg[,c("y")])
+coordinates(spg) <- ~ x + y
+# coerce to SpatialPixelsDataFrame
+gridded(spg) <- TRUE
+# coerce to raster
+raster <- raster(spg)
+plot(raster,col=topo.colors(100),colNA="light gray")
+
+#GGPlot
+rasterdf<-as.data.frame(raster, xy=T)
+worlddf<-as.data.frame(world, xy=T)
+worlddf$layer<-as.numeric(worlddf$layer)
+
+rasterdf<-na.omit(rasterdf)
+worlddf<-na.omit(worlddf)
+
+ggplot() + geom_tile(data=worlddf, aes(x=x,y=y,fill=layer))  + geom_tile(data=rasterdf,aes(x=x,y=y,fill=X1)) + scale_fill_viridis_c("Cor") + coord_quickmap() + ggtitle("mean log(chl-a) sig. correlating grids MW")
+
+
+spg_sst <- data.frame(grid)
+spg_sst$x<-as.numeric(spg_sst[,c("x")])
+spg_sst$y<-as.numeric(spg_sst[,c("y")])
+coordinates(spg_sst) <- ~ x + y
+# coerce to SpatialPixelsDataFrame
+gridded(spg_sst) <- TRUE
+# coerce to raster
+sst_brick<-brick(spg_sst)
+
+
+#Perform PCA
+sst_pca<-prcomp(t(sst_brick[!is.na(raster)]))
+summary(sst_pca)
+
+
+
+
+#Predict with PCAs
+sst_predict<-data.frame("sst_pca"=sst_pca$x[,1],"year"=c(1981:2013))
+cor_df<-data.frame("lagoslakeid"=NA,"obs"=NA,"preds"=NA)
+
+for (i in 2:ncol(wide)) {
+  cor_hold<-merge(wide[,c(1,i)],sst_predict,by="year")
+  cor_hold<-na.omit(cor_hold)
+  cor<-lm(cor_hold[,2]~cor_hold[,3])
+  cor_df<-rbind(cor_df,data.frame("lagoslakeid"=names(cor_hold[2]),"obs"=cor_hold[,2],"preds"=cor$fitted.values))
+}
+
+c<-cor.test(cor_df$obs,cor_df$preds)
+plot(cor_df$obs,cor_df$preds,pch=20,main="Predictions of mean JASO log(chl-a) using PC1 of MAMJ SST grids",xlab="Observations",ylab="Predictions",text(3,2.5,round(c$estimate^2,3)))
+
+round(c$estimate^2,3)
+
+
+```
+
+
+
+import importance from python
+
+```{r}
+#imp<-read.csv("/Users/maxbeal/Desktop/PhD/LAGOS_Forecasts/data/MW_sst_importance.csv")
+imp<-read.csv("/Users/maxbeal/Desktop/PhD/LAGOS_Forecasts/data/NE_sst_importance.csv")
+
+
+sst_grid_xy<-as.data.frame(t(grid))
+sst_grid_xy<-sst_grid_xy[-35,] #for NE
+
+
+abridge_grid["SST_grid",]<-colnames(abridge_grid)
+imp$names <- colnames(imp)
+
+imp_grid<-merge(t(abridge_grid),imp[,c(2,3)], by="SST_grid")
+imp_grid<-data.frame(imp_grid)
+
+imp_grid[imp_grid$import>0,]
+
+
+spg <- data.frame(imp_grid)
+spg<-spg[,c(2,3,5)]
+spg$x<-as.numeric(spg[,c("x")])
+spg$y<-as.numeric(spg[,c("y")])
+coordinates(spg) <- ~ x + y
+# coerce to SpatialPixelsDataFrame
+gridded(spg) <- TRUE
+# coerce to raster
+rasterDF <- raster(spg)
+rasterDF
+
+plot(rasterDF)
+```
+
+Autocorrelation
+
+```{r Autocorrelation}
+SST_timeseries<-t(sst_brick[rsnum>=10])
+
+for (i in 1:20){
+acf(SST_timeseries[,i])
+}
+
+plot(rowMeans(SST_timeseries))
+
+data.frame(SST_timeseries)
+
+```
+
+

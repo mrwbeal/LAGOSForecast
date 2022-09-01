@@ -1,0 +1,2147 @@
+
+Learning about working with the LAGOS database
+
+Libraries
+```{r Libraries}
+library(LAGOSNE)
+library(dplyr)
+library(ggplot2)
+library(maps)
+library(sf)
+library(devtools) #needed to download prism from github
+library(reshape2) ##melting dataframes
+library(raster) ##working with raster data
+library(sp) ##manipulationg spatial data
+library(prism) ##prism data access
+library(ggmap)
+library(lubridate)
+library(nlme)
+library(rgdal)
+library(dataRetrieval)
+library(tidyr)
+library(readr)
+library(ncdf4) # package for netcdf manipulation
+library(rlist)
+dt<-lagosne_load()
+```
+
+Download LAGOS data
+```{r Download LAGOS data}
+#LAGOSNE
+#lagosne_get(overwrite = T,dest_folder = LAGOSNE:::lagos_path())
+```
+
+Filtering lagos data
+
+```{r Filter LAGOS data}
+
+lg <- left_join(dt$epi_nutr, dt$locus)
+lg <- left_join(lg, dt$state)
+lg <- group_by(lg, state)
+lg <- filter(lg, !is.na(state))
+lg <- filter(lg)
+
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Wilkinsonetal/BloomIntensification_github")
+lakeinfo<-read.csv("lake_info.csv", stringsAsFactors=F)
+lg<-lg[lg$lagoslakeid %in% lakeinfo$lagoslakeid,]
+lg<-lg[year(lg$sampledate)>=1981,]
+rm(dt)
+#lg_save<-lg
+
+unique(lg$chla_labmethodname)
+
+```
+
+Combine Grace and chla and updated 2021 chla
+
+```{r}
+#Extra chl-a timeseries (need to update through 2021)
+chla_data<-read.csv("~/Desktop/PhD/LAGOS_Forecasts/Data/chla_data.csv")
+chla_data<-chla_data[chla_data$lagoslakeid>0,]
+chla_data<-chla_data[chla_data$source!="LAGOS-NE",]
+
+extra_chla<-list.files("~/Desktop/PhD/LAGOS_Forecasts/Data/Extra_chla_data",full.names = TRUE)
+
+chla_structure<-chla_data[1,] 
+chla_structure <- chla_structure[NA,]
+
+#Vermont
+for (i in 1:4) {
+id<-read.csv(extra_chla[1])
+id$lagoslakeid <- as.numeric(substr(extra_chla[i],65,68))
+id$Source <- "Vermont"
+id<-id[,c("lagoslakeid","VisitDate","Result","Source")]
+id$lake_year <- NA
+id$year<-substr(id$VisitDate,1,4)
+id<-id[id$year>2019,]
+names(id) <- names(chla_structure)
+chla_structure<-rbind(chla_structure,id)
+}
+
+#New York
+id<-read.csv(extra_chla[6])
+chla_structure<-rbind(chla_structure,id[,c(1:6)])
+
+
+#Minnesota
+id<-read.csv(extra_chla[5])
+id$lagoslakeid <- as.numeric(substr(extra_chla[5],65,67))
+id$Source <- "MN_MPCA"
+id<-id[id$parameter=="Chlorophyll a, corrected for pheophytin",]
+id<-id[,c("lagoslakeid","sampleDate","result","Source")]
+id$lake_year <- NA
+id$year<-substr(id$sampleDate,1,4)
+id<-id[id$year>2011,]
+names(id) <- names(chla_structure)
+chla_structure<-rbind(chla_structure,id[,c(1:6)])
+
+#Finalize
+chla_final<-rbind(chla_structure[-1,],chla_data)
+chla_final$lake_year<-paste(chla_final$lagoslakeid,chla_final$year,sep="_")
+
+lg_latlon<-unique(lg[,c("lagoslakeid","nhd_lat","nhd_long")])
+
+lg<-lg[,c("lagoslakeid","sampledate","chla")]
+lg$source <- "LAGOS-NE"
+lg$lake_year <- NA
+lg$year <- year(lg$sampledate)
+lg$lake_year <- paste(lg$lagoslakeid,lg$year,sep="_")
+
+lg<-rbind(lg,chla_final)
+
+lg<-lg[order(lg$year),]
+lg<-lg[order(lg$lagoslakeid),]
+
+lg$chla<-as.numeric(lg$chla)
+
+lg<-merge(lg,lg_latlon,by=c("lagoslakeid"))
+```
+
+Get monthly climatology
+
+```{r}
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+states.sub<-filter(states, ID %in% c("michigan","new york","wisconsin","minnesota","vermont","rhode island","maine","pennsylvania","ohio","missouri","new hampshire"))
+
+states.sub[states.sub$ID %in% c("new york","vermont","rhode island","maine","pennsylvania","new hampshire"), "cluster"] <- "Northeast"
+states.sub[states.sub$ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"), "cluster"] <- "Midwest"
+
+monthly_chla<-lg
+monthly_chla.sf<-st_as_sf(monthly_chla,coords=c("nhd_long","nhd_lat"),crs=4326)
+
+sf_use_s2(FALSE)
+
+monthly_chla.sf<-st_join(
+  monthly_chla.sf,
+  states.sub[,"cluster"],
+  join = st_within
+)
+
+
+
+monthly_chla.sf$month <- month(monthly_chla.sf$sampledate)
+
+monthly_chla.sf$logchla<-log(monthly_chla.sf$chla)
+
+se <- function(x) sd(x,na.rm=T)/sqrt(length(x))
+
+monthly_chla<-monthly_chla.sf %>% group_by(month, cluster) %>% summarise(monthly_chla=mean(logchla,na.rm=T),
+                                                                         monthly_sd = sd(logchla,na.rm=T),
+                                                                         monthly_se = se(logchla))
+
+monthly_chla$monthname<-month.abb[monthly_chla$month]
+
+monthly_chla<-na.omit(monthly_chla)
+
+
+ggplot(monthly_chla, aes(month,monthly_chla, color=cluster)) + geom_line(size=1) + theme_classic() + scale_color_manual(values = c("light blue","goldenrod")) + labs(color = "") + scale_x_continuous(breaks = c(1:12),labels=month.abb) + xlab("") + ylab("") + geom_errorbar(aes(ymin=monthly_chla-monthly_se, ymax=monthly_chla+monthly_se), width=.25, position=position_dodge(0)) + ylim(c(0,3))
+
+#Multi-lake timeseries plot
+lake_monthlychla<-monthly_chla.sf %>% group_by(lagoslakeid,month,cluster) %>% summarise(monthly_chla = mean(logchla,na.rm=T),                                                                             monthly_sd = sd(logchla,na.rm=T),
+                                                                         monthly_se = se(logchla))
+
+lake_monthlychla<-lake_monthlychla[!is.na(lake_monthlychla$cluster),]
+
+ggplot(lake_monthlychla, aes(month,monthly_chla, color = cluster, group=lagoslakeid)) + geom_point() + theme_classic() + scale_color_manual(values = c("light blue","goldenrod")) + labs(color = "") + scale_x_continuous(breaks = c(1:12),labels=month.abb) + xlab("") + ylab("")  + ylim(c(0,3))
+
+
+monthly_plot<-ggplot(monthly_chla, aes(month,monthly_chla, color=cluster)) + 
+  geom_line(size=1) + 
+  geom_point(data=lake_monthlychla, aes(month,monthly_chla,color=cluster),alpha=0.2) + 
+  theme_classic() + 
+  scale_color_manual(values = c("light blue","goldenrod")) + 
+  labs(color = "") + 
+  scale_x_continuous(breaks = c(1:12),labels=month.abb) + xlab("") + ylab("") + theme(legend.position="none")
+
+
+
+
+
+
+```
+
+
+Identify lakes with more than x years of data
+
+```{r Identify Lakes}
+
+
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+states<-filter(states, ID %in% c("michigan","new york","wisconsin","minnesota","vermont","rhode island","maine","pennsylvania","ohio","missouri"))
+
+
+
+
+lg$month <- month(lg$sampledate)
+
+chla_se<-aggregate(lg$chla,by=list(lg$month),se)[,2]
+chla_mean<-aggregate(lg$chla,by=list(lg$month),mean,na.rm=TRUE)[,2]
+
+plot(aggregate(lg$chla,by=list(lg$month),mean,na.rm=TRUE)[,1],
+     aggregate(lg$chla,by=list(lg$month),mean,na.rm=TRUE)[,2],
+     type="b",xlab="Month",pch=16,ylab="Mean chlorophyll-a (ug/L)")
+arrows(c(1:12),chla_mean, c(1:12),chla_mean+chla_se, length=0.05, angle=90)
+arrows(c(1:12),chla_mean, c(1:12),chla_mean-chla_se, length=0.05, angle=90)
+
+lg
+
+#Get MAMJ chlorophyll as a predictor
+lg_mam <-filter(lg, month==3|month==4|month==5|month==6)
+lg_mam<- filter(lg_mam, !is.na(chla))
+
+#Now filter predictand months of interest
+lg<-filter(lg, month==7|month==8|month==9|month==10)
+#lg<-filter(lg, month==7|month==8|month==9)
+#lg<-filter(lg, month==6|month==7|month==8)
+lg<- filter(lg, !is.na(chla))
+
+lake_years<-data.frame(lg$lagoslakeid,as.numeric(lg$year))
+
+lake_years<-lake_years %>% 
+  group_by(lg.lagoslakeid) %>%
+  summarise(no_years = length(unique(as.numeric.lg.year.)))
+
+#Greater than 15 years of data
+LOI<-filter(lake_years,no_years>=15)
+LOI_pattern<-unique(LOI$lg.lagoslakeid)
+
+tf<-lg$lagoslakeid %in% LOI_pattern
+
+lakes<-lg[tf,]
+
+plot(aggregate(lakes$chla,by=list(lakes$month),mean,na.rm=TRUE)[,1],
+     aggregate(lakes$chla,by=list(lakes$month),mean,na.rm=TRUE)[,2],
+     type="b",xlab="Month",ylab="Mean Chlorophyll-a")
+
+
+# chla_monthly<-lakes %>% group_by(month,state_name) %>% summarise(chla = mean(chla))
+# 
+# ggplot(chla_monthly, aes(month, chla)) + geom_line(aes(color=factor(state_name))) + xlab("Month") + ylab("Mean Chlorophyll-a") + labs(color="State") +theme_classic()
+
+# ggplot(chla_monthly, aes(as.factor(month), chla)) + geom_point(aes(color=factor(state_name)))
+
+#rm(lg)
+
+```
+
+*TEST Get mean chl-a and map
+```{r Map the lakes}
+#States
+
+lakes_m<-group_by(lakes, lagoslakeid)
+lakes_m <- summarize(lakes_m, 
+                      mean_chl  = mean(chla, na.rm = TRUE), 
+                      mean_long = mean(nhd_long, na.rm = TRUE), 
+                      mean_lat  = mean(nhd_lat, na.rm = TRUE))
+lakes_m <- filter(lakes_m, !is.na(mean_chl))
+
+lakes_m <- st_as_sf(lakes_m, coords = c("mean_long", "mean_lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lakes_m, aes(color = log(mean_chl))) + 
+  theme_bw() + scale_color_gradient(low = "white", high = "darkgreen") +
+  labs(color = "log(Chlorophyll a (ug/L))")
+
+par(mfrow=c(1,2))
+hist(lakes_m$mean_chl, xlab="JASO chlorophyll-a (ug/L)",main="") 
+hist(log(lakes_m$mean_chl), xlab="JASO log(chlorophyll-a) (ug/L)",main="", xlim=c(0,5), ylab="")
+
+
+```
+
+Get lakes of interest (>x years) into a dataframe years vs chl - get data since 1982
+
+```{r Get Lakes of Interest (>x)}
+
+loi.chla<-data.frame(
+  "lagoslakeid"=lakes$lagoslakeid,
+  "sampledate"=lakes$sampledate,
+  "chla"=lakes$chla,
+  "nhd_long"=lakes$nhd_long,
+  "nhd_lat"=lakes$nhd_lat)
+
+lake.id <- unique(loi.chla$lagoslakeid)
+lake.id<-lake.id[order(lake.id)]
+lakeinfo<-lakeinfo[lakeinfo$lagoslakeid %in% lake.id,]
+
+
+loi.chla$year <- as.numeric(substr(loi.chla$sampledate,1,4))
+loi.chla$month <- as.numeric(substr(loi.chla$sampledate,6,7))
+
+
+#Calculate the duration (proportion of sample days above relevant thresholds for chl-a in season each year)
+duration<-data.frame("year"=NA,"tIMug"=NA,"lake.id"=NA)
+
+thresh1<-11#ug/L; threshold for an impaired lake in the mountains/upper mid west
+thresh2<-40#ug/L; threshold for an impaired lake in the plains
+
+for(ii in 1:length(lake.id)){
+  tmp<-loi.chla[loi.chla$lagoslakeid == lake.id[ii],]
+  tmp$year<-year(tmp$sampledate)
+  tmp.agg<-data.frame(year=unique(tmp$year),tIMug=NA,"lake.id"=unique(tmp$lagoslakeid))
+  for(yy in 1:length(tmp.agg$year)){
+    tmp.yy<-tmp[tmp$year == tmp.agg$year[yy],]
+    tmp.agg$lake.id[ii] == lake.id[ii]
+    if(lakeinfo$class[ii]=="mountains"){
+      tmp.agg$tIMug[yy]<-sum(tmp.yy$chla > thresh1)/nrow(tmp.yy)
+    }
+    if(lakeinfo$class[ii]=="plains"){
+      tmp.agg$tIMug[yy]<-sum(tmp.yy$chla > thresh2)/nrow(tmp.yy)
+    }
+  }
+  duration<-rbind(duration,tmp.agg)
+}
+
+duration<-duration[-1,]
+
+
+#Get mean, 95th percentile, and duration for chl-a in MAMJ
+loi.chla<-loi.chla %>%
+  group_by(year, lagoslakeid) %>%
+  summarise(mean_chl = mean(chla,na.rm=TRUE),
+            chl95 = quantile(chla, probs=0.95, na.rm=TRUE),
+            mean_long = mean(nhd_long, na.rm = TRUE), 
+            mean_lat  = mean(nhd_lat, na.rm = TRUE))
+
+
+#Order duration by year
+duration<-duration[order(duration$year),]
+
+#Combine datasets
+loi.chla$dur<-duration[order(duration$lake.id),2]
+
+loi.chla[order(loi.chla$lagoslakeid),]
+length(unique(loi.chla$lagoslakeid)) #number of lakes with 20 years of summertime chla data
+
+loi.chla<-loi.chla[loi.chla$year>1981,]
+
+loi.chla.sf <- st_as_sf(loi.chla, coords = c("mean_long", "mean_lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = loi.chla.sf, aes(color = mean_chl)) + 
+  theme_bw() + scale_color_gradient(low = "white", high = "darkgreen")
+                                              
+```
+
+Get Pre-season chlorophyll-a, chl 95, and duration
+
+```{r Get Pre-season Chl-a}
+
+loi.mamj<-lg_mam[lg_mam$lagoslakeid %in% loi.chla$lagoslakeid,]
+
+loi.mamj.agg<-loi.mamj %>%
+  group_by(year, lagoslakeid) %>%
+  summarise(mamj_chl = mean(chla,na.rm=TRUE),
+            mamj_chl95 = quantile(chla, probs=0.95, na.rm=TRUE))
+
+
+#Calculate the pre-season duration (proportion of sample days above relevant thresholds for chl-a in season each year)
+duration<-data.frame("year"=NA,"tIMug"=NA,"lake.id"=NA)
+
+thresh1<-11#ug/L; threshold for an impaired lake in the mountains/upper mid west
+thresh2<-40#ug/L; threshold for an impaired lake in the plains
+
+for(ii in 1:length(lake.id)){
+  tmp<-loi.mamj[loi.mamj$lagoslakeid == lake.id[ii],]
+  tmp$year<-year(tmp$sampledate)
+  tmp.agg<-data.frame(year=unique(tmp$year),tIMug=NA,"lake.id"=unique(tmp$lagoslakeid))
+  for(yy in 1:length(tmp.agg$year)){
+    tmp.yy<-tmp[tmp$year == tmp.agg$year[yy],]
+    tmp.agg$lake.id[ii] == lake.id[ii]
+    if(lakeinfo$class[ii]=="mountains"){
+      tmp.agg$tIMug[yy]<-sum(tmp.yy$chla > thresh1)/nrow(tmp.yy)
+    }
+    if(lakeinfo$class[ii]=="plains"){
+      tmp.agg$tIMug[yy]<-sum(tmp.yy$chla > thresh2)/nrow(tmp.yy)
+    }
+  }
+  duration<-rbind(duration,tmp.agg)
+}
+
+duration<-duration[-1,]
+
+
+loi.chla<-merge(loi.chla,loi.mamj.agg, by=c("lagoslakeid","year"),all.x=TRUE)
+
+
+#Order duration by year
+duration<-duration[order(duration$year),]
+names(duration)[3] <-"lagoslakeid"
+names(duration)[2] <-"mamj_dur"
+
+#Combine datasets
+
+loi.chla<-merge(duration,loi.chla,by=c("lagoslakeid","year"),all.x=TRUE)
+
+#preseason Log chl-a works best
+cor.test(log(loi.chla$mean_chl),log(loi.chla$mamj_chl))
+plot(log(loi.chla$mean_chl),log(loi.chla$mamj_chl))
+
+
+cor.test(log(loi.chla$chl95),log(loi.chla$mamj_chl95))
+plot(log(loi.chla$chl95),log(loi.chla$mamj_chl95))
+
+
+cor.test(loi.chla$mean_chl,loi.chla$mamj_dur)
+plot(loi.chla$mean_chl, loi.chla$mamj_dur)
+
+mamj<-loi.chla[,c("lagoslakeid","year","mamj_chl","mamj_chl95","mamj_dur")]
+
+loi.chla<-na.omit(loi.chla)
+#write.csv(loi.chla,"~/Desktop/chl_vars.csv")
+```
+
+
+
+Need to get MAMJ precipitation data for each lake, PRISM Need to match with lake 
+
+```{r PRISM monthly precipitation download}
+loi.chla<-read.csv("~/Desktop/PhD/LAGOS_Forecasts/Data/chl_vars.csv")
+
+years<-unique(loi.chla$year)
+years<-years[order(years)]
+years <- years[years>1980]
+
+prism_set_dl_dir("/Volumes/Data Drive/prism")
+get_prism_monthlys(type = 'ppt', years=years, mon = 3:6, keepZip = FALSE)
+ls_prism_data(name=TRUE)
+
+new_file<-c(1) ##change to corresponding file numbers
+RS <- prism_stack(ls_prism_data()[new_file,1]) ##raster file
+
+df <- data.frame(rasterToPoints(RS)) ##creates a dataframe of points
+month.df <- melt(df, c("x", "y"))
+names(month.df)[1:2] <- c("lon", "lat") #rename columns
+
+
+#Choose which months
+prcp <- prism_archive_subset("ppt", "monthly", mon = 3:6, years=years)
+```
+
+Daily precip (only available from 1981)
+
+```{r PRISM daily precipitation download}
+#Daily data only available as of 1981
+prism_set_dl_dir("/Volumes/Data Drive/prism")
+st <- as.Date("1981-03-01")
+st <- as.Date("2013-03-01")
+en <- as.Date("2020-06-30")
+
+#replace corrupt data
+#st <- as.Date("1989-05-07")
+#en <- as.Date("1989-05-10")
+
+daily_prcp<-seq(from = st, to = en, by ="day")
+daily_prcp_dates<-daily_prcp[month(daily_prcp)==3|month(daily_prcp)==4|month(daily_prcp)==5|month(daily_prcp)==6]
+
+get_prism_dailys(type = 'ppt', dates = daily_prcp_dates, keepZip = FALSE)
+
+prcp_day<- prism_archive_subset("ppt", "daily", mon = 3:6)
+```
+
+Now extract precip data for lakes - Monthly
+
+```{r Extract Monthly Precipitation}
+
+loi.chla.sp<-SpatialPointsDataFrame(coords=loi.chla[,c('mean_long','mean_lat')], 
+                       data=loi.chla, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+prcp_path <- pd_to_file(prcp)
+
+# lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,"mean_long"=NA,"mean_lat"=NA,"dur"=NA,"layer"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+# 
+# #set sequence to number of months
+# for (i in seq(from=1, to=length(prcp_path),by=4)) {
+# RS3 <- raster(prcp_path[i]) 
+# RS4 <- raster(prcp_path[i+1])
+# RS5 <- raster(prcp_path[i+2])
+# #RSsum<-sum(RS3,RS4,RS5)
+# #RSsum<-sum(RS4,RS5)
+# year<-as.numeric(substr(names(RS3),24,27))
+# ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+# hold<-raster::extract(RSsum, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+# hold <- as.data.frame(hold)
+# lakes.prcp<-rbind(lakes.prcp,hold,hold2,hold3,hold4)
+# }
+
+
+#Individual months precip
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,"dur"=NA,
+                         "mar_prcp"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+#March
+for (i in seq(from=1, to=length(prcp_path),by=4)) {
+RS <- raster(prcp_path[i]) 
+year<-as.numeric(substr(names(RS),24,27))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[8] <- "mar_prcp"
+lakes.prcp<-rbind(lakes.prcp,hold)
+}
+mar<-lakes.prcp[-1,c("lagoslakeid","mar_prcp")]
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,"dur"=NA,
+                         "apr_prcp"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+
+#April
+for (i in seq(from=1, to=length(prcp_path),by=4)) {
+RS <- raster(prcp_path[i+1]) 
+year<-as.numeric(substr(names(RS),24,27))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[8] <- "apr_prcp"
+lakes.prcp<-rbind(lakes.prcp,hold)
+}
+apr<-lakes.prcp[-1,c("lagoslakeid","apr_prcp")]
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,"dur"=NA,
+                         "may_prcp"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+
+#May
+for (i in seq(from=1, to=length(prcp_path),by=4)) {
+RS <- raster(prcp_path[i+2]) 
+year<-as.numeric(substr(names(RS),24,27))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[8] <- "may_prcp"
+lakes.prcp<-rbind(lakes.prcp,hold)
+}
+may<-lakes.prcp[-1,c("lagoslakeid","may_prcp")]
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,"dur"=NA,
+                         "june_prcp"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+
+#June
+for (i in seq(from=1, to=length(prcp_path),by=4)) {
+RS <- raster(prcp_path[i+3]) 
+year<-as.numeric(substr(names(RS),24,27))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[8] <- "june_prcp"
+lakes.prcp<-rbind(lakes.prcp,hold)
+}
+
+lakes.prcp<-cbind(lakes.prcp[-1,],"mar_prcp"=mar[,2],"apr_prcp"=apr[,2],"may_prcp"=may[,2])
+
+lakes.prcp[order(lakes.prcp$lagoslakeid),]
+
+#write.csv(lakes.prcp,"~/Desktop/MonthlyPrecipLagos.csv")
+```
+
+Try extracting different spatial grids
+
+```{r Monthly precipitation spatial iteration}
+
+loi.chla.sp<-SpatialPointsDataFrame(coords=loi.chla[,c('mean_long','mean_lat')], 
+                       data=loi.chla, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+#Set to backup drive data source
+path <- "/Volumes/BackupDrive/Data/prismtmp"
+prism_set_dl_dir(path)
+
+#monthly_prism_prcp<-prism_archive_ls()
+monthly_prism_prcp<-prism_archive_subset("ppt", "monthly", mon = 3:6, years = min(loi.chla$year):max(loi.chla$year))
+
+
+
+prcp_path<-pd_to_file(monthly_prism_prcp)
+
+#Want to iterate through lakes and see which prcp grid surrounding the lake correlated best
+# Use rough measurement of 1.11km = 0.01 dd, 4km = 0.036 dd
+
+grid_spacing = 0.036
+
+#Individual months precip
+l = list("Correlations") #Create a list to store multiple correlation dataframes
+
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,"dur"=NA,
+                         "mar_prcp"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "chl95.pvalue"=NA,"chl95.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA)
+
+lat_ind<-c(-1,0,1,-1,0,1,-1,0,1)
+long_ind<-c(-1,-1,-1,0,0,0,1,1,1)
+
+#March
+for (j in 1:length(lat_ind)) {
+  
+#This outside loop tests 9 grids of monthly precip data from PRISM around the original LAGOS data point
+sp.long<-loi.chla.sp@coords[,1] + long_ind[j]*grid_spacing #1st column long
+sp.lat<-loi.chla.sp@coords[,2] + lat_ind[j]*grid_spacing #2nd column lat
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "chl95"=loi.chla.sp@data$chl95,
+                    "dur" = loi.chla.sp@data$dur,
+                     "mean_long"=sp.long,
+                     "mean_lat"=sp.lat)
+
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+
+#This loop is for extracting data 
+  for (i in seq(from=1, to=length(prcp_path),by=4)) {
+  RS <- raster(prcp_path[i]) 
+  year<-as.numeric(substr(names(RS),24,27))
+  ex<-points.sp[points.sp@data$year==year,]
+  hold<-raster::extract(RS, ex,fun=mean, na.rm=TRUE, sp=TRUE)
+  hold <- as.data.frame(hold)
+  names(hold)[8] <- "mar_prcp"
+  lakes.prcp<-rbind(lakes.prcp,hold)
+  }
+
+#This loop is for generating correaltions for each lake
+  for (k in 1:length(lake.id)) {
+  hold<-lakes.prcp %>% subset(lagoslakeid==lake.id[k])
+  mean.cor<-cor.test(hold$mean_chl,hold$mar_prcp)
+  chl95.cor<-cor.test(hold$chl95,hold$mar_prcp)
+  dur.cor<-cor.test(hold$dur,hold$mar_prcp)
+  string<-data.frame("mean.pvalue"=mean.cor$p.value,
+                   "mean.cor"=mean.cor$estimate,
+                   "chl95.pvalue"=chl95.cor$p.value,
+                   "chl95.cor"=chl95.cor$estimate,
+                   "dur.pvalue"=dur.cor$p.value,
+                   "dur.cor"=dur.cor$estimate,
+                   "lagoslakeid"=hold$lagoslakeid)
+  lake.cors<-rbind(lake.cors,string)
+  }
+
+l[[j]] <- lake.cors
+
+#Reset the lake.cors dataframe
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "chl95.pvalue"=NA,"chl95.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA)
+
+#Reset the precipitation dataframe
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,"dur"=NA,
+                         "mar_prcp"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+
+}
+
+
+
+cordf<-data.frame("lagoslakeid"=NA,"R2_meanchl"=NA)
+
+for (i in 1:9) {
+cormatrix<-l[[i]] %>% group_by(lagoslakeid) %>% summarise("R2_meanchl"=mean(mean.cor^2))
+cordf<-cbind(cordf,cormatrix)  
+}
+
+#clean up dataframe of R^2 values and find highest value for each lake
+cordf<-cordf[,-c(1,2,5,7,9,11,13,15,17,19)]
+maxR2<-apply(cordf[,-1],1,FUN=max)
+
+
+for (i in 1:132) {
+  grid_hold[i]<-which(cordf[i,-1]==maxR2[i])
+}
+
+best_grids<-as.data.frame(cbind(grid_hold,"lagoslakeid"=na.omit(cordf$lagoslakeid)))
+
+
+#mar<-lakes.prcp[-1,c("lagoslakeid","mar_prcp")]
+
+
+
+```
+
+
+Extract daily precipitation
+
+```{r Extract Daily Precipitation}
+prcp_path<-pd_to_file(prcp_day)
+
+dates<-as.Date(substr(prcp_path,84,91),"%Y%m%d")
+
+lakes.prcp.daily <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,"mean_long"=NA,"mean_lat"=NA,"dur"=NA,"EE"=NA)
+
+# for (i in 1:length(unique(year(dates)))) {
+# year<-unique(year(dates))[i]
+# hold<-stack(prcp_path[year(dates)==year])
+# ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+# hold2<-raster::extract(hold, ex, fun=mean, na.rm=TRUE, sp=TRUE)
+# hold2<-as.data.frame(hold2)
+# hold2$EE<-rowSums(hold2[,c(9:ncol(hold2))]>25)
+# hold3<-hold2[,-c(9:ncol(hold2)-1)]
+# lakes.prcp.daily<-rbind(lakes.prcp.daily,hold3)
+# }
+
+#remove corrupted years (1989 [9], 1999)
+
+setwd("~/prismtmp")
+raster::stack(prcp_path[year(dates)==year])
+
+prcp_day <- prism_archive_subset("ppt", "daily", mon = 3, years=years)
+prcp_path<-pd_to_file(prcp_day)
+dates<-as.Date(substr(prcp_day,24,31),"%Y%m%d")
+daily.prcp.years<-unique(year(dates))[-c(8,18)]
+
+for (i in 1:length(daily.prcp.years)) {
+year<-daily.prcp.years[i]
+hold<-raster::stack(prcp_path[year(dates)==year])
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold2<-raster::extract(hold, ex, fun=mean, na.rm=TRUE, sp=TRUE)
+hold2<-as.data.frame(hold2)
+hold2$EE<-rowSums(hold2[,c(9:ncol(hold2))]>25)
+hold3<-hold2[,-c(9:ncol(hold2)-1)]
+lakes.prcp.daily<-rbind(lakes.prcp.daily,hold3)
+}
+
+mar_ee <- lakes.prcp.daily
+
+lakes.prcp.daily <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,
+                               "mean_long"=NA,"mean_lat"=NA,"dur"=NA,"EE"=NA)
+prcp_day<- prism_archive_subset("ppt", "daily", mon = 4,years=years)
+prcp_path<-pd_to_file(prcp_day)
+dates<-as.Date(substr(prcp_day,24,31),"%Y%m%d")
+daily.prcp.years<-unique(year(dates))[-c(8,18)]
+
+for (i in 1:length(daily.prcp.years)) {
+year<-daily.prcp.years[i]
+hold<-stack(prcp_path[year(dates)==year])
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold2<-raster::extract(hold, ex, fun=mean, na.rm=TRUE, sp=TRUE)
+hold2<-as.data.frame(hold2)
+hold2$EE<-rowSums(hold2[,c(9:ncol(hold2))]>25)
+hold3<-hold2[,-c(9:ncol(hold2)-1)]
+lakes.prcp.daily<-rbind(lakes.prcp.daily,hold3)
+}
+
+apr_ee <- lakes.prcp.daily
+
+lakes.prcp.daily <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,"mean_long"=NA,
+                               "mean_lat"=NA,"dur"=NA,"EE"=NA)
+prcp_day<- prism_archive_subset("ppt", "daily", mon = 5, years=years)
+prcp_path<-pd_to_file(prcp_day)
+dates<-as.Date(substr(prcp_day,24,31),"%Y%m%d")
+daily.prcp.years<-unique(year(dates))[-c(8,18)]
+
+for (i in 1:length(daily.prcp.years)) {
+year<-daily.prcp.years[i]
+hold<-stack(prcp_path[year(dates)==year])
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold2<-raster::extract(hold, ex, fun=mean, na.rm=TRUE, sp=TRUE)
+hold2<-as.data.frame(hold2)
+hold2$EE<-rowSums(hold2[,c(9:ncol(hold2))]>25)
+hold3<-hold2[,-c(9:ncol(hold2)-1)]
+lakes.prcp.daily<-rbind(lakes.prcp.daily,hold3)
+}
+
+may_ee<-lakes.prcp.daily
+
+lakes.prcp.daily <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_chl"=NA,"chl95"=NA,"mean_long"=NA,
+                               "mean_lat"=NA,"dur"=NA,"EE"=NA)
+prcp_day<- prism_archive_subset("ppt", "daily", mon = 6, years=years)
+prcp_path<-pd_to_file(prcp_day)
+dates<-as.Date(substr(prcp_day,24,31),"%Y%m%d")
+daily.prcp.years<-unique(year(dates))[-c(8,18)]
+
+for (i in 1:length(daily.prcp.years)) {
+year<-daily.prcp.years[i]
+hold<-stack(prcp_path[year(dates)==year])
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold2<-raster::extract(hold, ex, fun=mean, na.rm=TRUE, sp=TRUE)
+hold2<-as.data.frame(hold2)
+hold2$EE<-rowSums(hold2[,c(9:ncol(hold2))]>25)
+hold3<-hold2[,-c(9:ncol(hold2)-1)]
+lakes.prcp.daily<-rbind(lakes.prcp.daily,hold3)
+}
+
+monthly_ee<-cbind(lakes.prcp.daily,"mar_ee"=mar_ee[,"EE"],"apr_ee"=apr_ee[,"EE"],"may_ee"=may_ee[,"EE"])
+
+#write.csv(monthly_ee,"~/Desktop/monthly.ee.LAGOS.csv")
+
+
+#corrupted
+#1989
+#1999
+
+```
+Extract monthly Temperature
+
+```{r Extract Monthly Temperature}
+
+nao.df <- read.csv("~/Desktop/PhD/LAGOS_forecasts/data/chl_vars.csv")
+
+
+loi.chla.sp<-SpatialPointsDataFrame(coords=nao.df[,c('mean_long','mean_lat')], 
+                       data=nao.df, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+years<-unique(nao.df$year)
+years <- years[years>1980]
+#get_prism_monthlys(type = 'tmean', years=years, mon = 3:6, keepZip = TRUE)
+#get_prism_monthlys(type = 'tmean', years=years, mon = 7:10, keepZip = TRUE)
+#ls_prism_data(name=TRUE)
+
+
+
+###################################################################################
+#Choose which months
+tmean <- prism_archive_subset("tmean", "monthly", mon = 3:6, years=years)
+tmean_path <- pd_to_file(tmean)
+
+#Individual months precip
+lakes.tmean = nao.df[1,]
+lakes.tmean[1,] = NA
+lakes.tmean=data.frame(lakes.tmean)
+
+lakes.tmean$mar_tmean = NA
+
+#March
+for (i in seq(from=1, to=length(tmean_path),by=4)) {
+RS <- raster(tmean_path[i]) 
+year<-as.numeric(substr(names(RS),26,29))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[12] <- "mar_tmean"
+drop <- c("mean_long.1","mean_lat.1")
+hold = hold[,!(names(hold) %in% drop)]
+lakes.tmean<-rbind(lakes.tmean,hold)
+}
+mar<-lakes.tmean[-1,c("lagoslakeid","mar_tmean")]
+
+
+lakes.tmean = nao.df[1,]
+lakes.tmean[1,] = NA
+lakes.tmean=data.frame(lakes.tmean)
+
+lakes.tmean$apr_tmean = NA
+
+#April
+for (i in seq(from=1, to=length(tmean_path),by=4)) {
+RS <- raster(tmean_path[i+1]) 
+year<-as.numeric(substr(names(RS),26,29))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[12] <- "apr_tmean"
+drop <- c("mean_long.1","mean_lat.1")
+hold = hold[,!(names(hold) %in% drop)]
+lakes.tmean<-rbind(lakes.tmean,hold)
+}
+apr<-lakes.tmean[-1,c("lagoslakeid","apr_tmean")]
+
+
+lakes.tmean = nao.df[1,]
+lakes.tmean[1,] = NA
+lakes.tmean=data.frame(lakes.tmean)
+
+lakes.tmean$may_tmean = NA
+
+#May
+for (i in seq(from=1, to=length(tmean_path),by=4)) {
+RS <- raster(tmean_path[i+2]) 
+year<-as.numeric(substr(names(RS),26,29))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[12] <- "may_tmean"
+drop <- c("mean_long.1","mean_lat.1")
+hold = hold[,!(names(hold) %in% drop)]
+lakes.tmean<-rbind(lakes.tmean,hold)
+}
+
+may<-lakes.tmean[-1,c("lagoslakeid","may_tmean")]
+
+
+lakes.tmean = nao.df[1,]
+lakes.tmean[1,] = NA
+lakes.tmean=data.frame(lakes.tmean)
+
+lakes.tmean$june_tmean = NA
+
+#June
+for (i in seq(from=1, to=length(tmean_path),by=4)) {
+RS <- raster(tmean_path[i+3]) 
+year<-as.numeric(substr(names(RS),26,29))
+ex<-loi.chla.sp[loi.chla.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[12] <- "june_tmean"
+drop <- c("mean_long.1","mean_lat.1")
+hold = hold[,!(names(hold) %in% drop)]
+lakes.tmean<-rbind(lakes.tmean,hold)
+}
+
+lakes.tmean<-cbind(lakes.tmean[-1,],"mar_tmean"=mar[,2],"apr_tmean"=apr[,2],"may_tmean"=may[,2])
+
+lakes.tmean$MAMJ_tmean <- rowMeans(lakes.tmean[,c("mar_tmean","apr_tmean","may_tmean","june_tmean")])
+
+lakes.tmean[order(lakes.tmean$lagoslakeid),]
+
+#write.csv(lakes.tmean,"~/Desktop/MonthlyTMeanLagos.csv")
+```
+
+
+Bring in climate indicies (MEI and Nino3.4 & Nino1.2)
+
+```{r Climate Indicies}
+#MEI
+
+mei<-read.csv("~/Desktop/PhD/Ideas/Green Lake/Data/MEI.csv") #only goes back to 1979
+mam.mei<-data.frame("year"=mei[,1],"MAM.mei"=rowMeans(mei[,c(5,6)]))
+
+for (i in 1:nrow(lakes.prcp)) {
+  for (j in 1:nrow(mam.mei)) {
+      if (lakes.prcp$year[i]==mam.mei$year[j]) {
+    lakes.prcp$mam.mei[i] <- mam.mei$MAM.mei[j]
+  }
+  }
+}
+lakes.mei<-lakes.prcp[lakes.prcp$year>=1979,]
+lake.id<-unique(lakes.mei$lagoslakeid)
+
+
+nao<-read.csv("~/Desktop/PhD/nao_station_monthly.csv")
+for (i in 1:nrow(lakes.prcp)) {
+  for (j in 1:nrow(nao)) {
+      if (lakes.prcp$year[i]==nao$year[j]) {
+    lakes.prcp$nao[i] <- mean(nao$Mar[j],nao$Apr[j],nao$May[j],nao$Jun[j])
+  }
+  }
+}
+
+
+nino<-read.csv("~/Desktop/PhD/mam_nino_index.csv")
+for (i in 1:nrow(lakes.prcp)) {
+  for (j in 1:nrow(nino)) {
+      if (lakes.prcp$year[i]==nino$year[j]) {
+    lakes.prcp$nino3.4[i] <- nino$MAM_nino3.4[j]
+  }
+  }
+}
+
+for (i in 1:nrow(lakes.prcp)) {
+  for (j in 1:nrow(nino)) {
+      if (lakes.prcp$year[i]==nino$year[j]) {
+    lakes.prcp$nino1.2[i] <- nino$MAM_nino1.2[j]
+  }
+  }
+}
+
+lakes.nino <- lakes.prcp #remove mei field if necessary
+lakes.nino$mei <- lakes.mei$mam.mei
+lakes.nino$nao <- lakes.prcp$nao
+
+```
+
+USGS Streamflow
+
+```{r Get USGS streamflow data}
+
+lake_geom<-unique(data.frame(lakes$lagoslakeid,lakes$nhd_lat,lakes$nhd_long,lakes$gnis_name))
+
+bound_alt = 0.35
+
+siteNo<-data.frame("site_no"=NA,"site_lat"=NA,"site_long"=NA,"nhd_lat"=NA,"nhd_long"=NA,"lagoslakeid"=NA,"gnis_name"=NA)
+
+start.date <- lakes[order(lakes$sampledate),]$sampledate[1]
+end.date <- lakes[order(lakes$sampledate),]$sampledate[11629]
+
+for (i in 1:nrow(lake_geom)) {
+ box = c(lake_geom$lakes.nhd_long[i]-bound_alt,
+       lake_geom$lakes.nhd_lat[i]-bound_alt,
+       lake_geom$lakes.nhd_long[i]+bound_alt,
+       lake_geom$lakes.nhd_lat[i]+bound_alt)
+
+sites <- whatNWISsites(bBox=c(box), 
+                      parameterCd=c("00060"),
+                      hasDataTypeCd="dv",
+                      startDate=start.date,
+                      endDate=end.date)
+
+hold <- data.frame("site_no"=sites[,2],
+                   "site_lat"=sites[,5],
+                   "site_long"=sites[,6],
+                   "nhd_lat"=lake_geom[i,2],
+                   "nhd_long"=lake_geom[i,3],
+                   "lagoslakeid"=lake_geom[i,1],
+                   "gnis_name"=lake_geom[i,4])
+siteNo<-rbind(hold, siteNo)
+}
+
+
+siteNo$sub_lat<-siteNo$site_lat-siteNo$nhd_lat
+siteNo$sub_long<-siteNo$site_long-siteNo$nhd_long
+
+minlat<-siteNo %>% group_by(lagoslakeid) %>% summarise("min_lat"=min(sub_lat))
+minlong<-siteNo %>% group_by(lagoslakeid) %>% summarise("min_long"=min(sub_long))
+
+gage_lat <- siteNo[siteNo$sub_lat %in% minlat$min_lat,]
+siteNo[siteNo$sub_long %in% minlong$min_long,]
+
+siteNo[siteNo$sub_lat %in% minlat$min_lat,]$lagoslakeid == siteNo[siteNo$sub_long %in% minlong$min_long,]$lagoslakeid
+
+
+
+siteNum <- na.omit(gage_lat$site_no)
+pCode <- "00060"
+potential_sites <- readNWISdv(siteNumbers = siteNum,
+                     parameterCd = pCode,
+                     startDate = start.date,
+                     endDate = end.date)
+
+
+potential_sites$month<-month(potential_sites$Date)
+potential_sites$year<-year(potential_sites$Date)
+mam_sites<-potential_sites %>% subset(month %in% c(3,4,5))
+
+grouped<-mam_sites %>% group_by(site_no, year) %>% summarise("mam_dis"=mean(X_00060_00003))
+
+grouped$lagoslakeid = as.numeric(NA)
+
+#Need to match usgs site with lake id
+#Iterate to try correlations - pull from grouped file
+site_match<-unique(data.frame("lagoslakeid"=siteNo$lagoslakeid,"site_no"=siteNo$site_no))
+
+
+#if the usgs gage has the same number of years of data as the lake data, attach the lake id to the grouped
+#this only worked for one site
+for (i in 1:nrow(site_match)) {
+  if (nrow(grouped[site_match[i,2]==grouped[,1],])>=nrow(lakes.nino[lakes.nino$lagoslakeid==site_match[i,1],])) {
+    grouped[site_match[i,2]==grouped[,1],]$lagoslakeid <- as.numeric(site_match[i,1])
+  }
+  else{}
+}
+
+
+#find way to attach
+grouped
+#now look at correlations 
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,"chl95.pvalue"=NA,"chl95.cor"=NA,"dur.pvalue"=NA,"dur.cor"=NA)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.nino %>% subset(lagoslakeid==lake.id[i])
+hold2<-grouped %>% subset(lagoslakeid==lake.id[i])
+mean.cor<-cor.test(log(hold$mean_chl),hold2$mam_dis)
+chl95.cor<-cor.test(log(hold$chl95),hold2$mam_dis)
+dur.cor<-cor.test(log(hold$dur),hold2$mam_dis)
+string<-data.frame("mean.pvalue"=mean.cor$p.value,
+                   "mean.cor"=mean.cor$estimate,
+                   "chl95.pvalue"=chl95.cor$p.value,
+                   "chl95.cor"=chl95.cor$estimate,
+                   "dur.pvalue"=dur.cor$p.value,
+                   "dur.cor"=dur.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+```
+
+
+Correlation Analysis ENSO (mean chlorophyll)
+
+```{r Mean chl correlation}
+
+#lakes.nino<-read.csv("~/Desktop/PhD/LAGOS_forecasts/data/LagosMAMJdata_secchi_chl.csv")
+
+cor.test(log(lakes.nino$mean_chl),lakes.nino$JASO_tmean)
+plot(log(lakes.nino$mean_chl),lakes.nino$JASO_tmean)
+
+lakes.nino <- lakes.tmean
+
+#ENSO
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA,"enso3.4.pvalue"=NA,"enso3.4.cor"=NA,"enso1.2.pvalue"=NA,"enso1.2.cor"=NA)
+
+lake.id<-unique(lakes.nino$lagoslakeid)
+
+#test log mean chl
+for (i in 1:length(lake.id)) {
+hold<-lakes.nino %>% subset(lagoslakeid==lake.id[i])
+prcp.cor<-cor.test(hold$mean_chl,hold$total_prcp)
+enso3.4.cor<-cor.test(log(hold$mean_chl),hold$july_tmean)
+enso1.2.cor<-cor.test(hold$mean_chl,hold$apr_prcp)
+string<-data.frame("prcp.pvalue"=prcp.cor$p.value,
+                   "prcp.cor"=prcp.cor$estimate,
+                   "enso3.4.pvalue"=enso3.4.cor$p.value,
+                   "enso3.4.cor"=enso3.4.cor$estimate,
+                   "enso1.2.pvalue"=enso1.2.cor$p.value,
+                   "enso1.2.cor"=enso1.2.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.nino[,c(1,7,8)])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso3.4.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "July tmean")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso1.2.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "April precipitation")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = prcp.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "Total Precipitation")
+
+hist(lake.cors$prcp.cor,xlim=c(-1,1))
+hist(lake.cors$enso3.4.cor,xlim=c(-1,1))
+hist(lake.cors$enso1.2.cor,xlim=c(-1,1))
+
+#lakes with some significance
+unique(lake.cors[lake.cors$prcp.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$enso3.4.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$enso1.2.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$mei.pvalue<0.05,]$lakeid)
+```
+
+Correlation Analysis ENSO (95th chlorophyll)
+
+```{r severity correlation}
+
+
+#ENSO
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA,"enso3.4.pvalue"=NA,"enso3.4.cor"=NA,"enso1.2.pvalue"=NA,"enso1.2.cor"=NA)
+
+lake.id<-unique(lakes.nino$lagoslakeid)
+
+#test log chl
+for (i in 1:length(lake.id)) {
+hold<-lakes.nino %>% subset(lagoslakeid==lake.id[i])
+prcp.cor<-cor.test(log(hold$chl95),hold$june_prcp)
+enso3.4.cor<-cor.test(log(hold$chl95),hold$may_prcp)
+enso1.2.cor<-cor.test(log(hold$chl95),hold$apr_prcp)
+string<-data.frame("prcp.pvalue"=prcp.cor$p.value,
+                   "prcp.cor"=prcp.cor$estimate,
+                   "enso3.4.pvalue"=enso3.4.cor$p.value,
+                   "enso3.4.cor"=enso3.4.cor$estimate,
+                   "enso1.2.pvalue"=enso1.2.cor$p.value,
+                   "enso1.2.cor"=enso1.2.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.nino[,c(2,5,6)])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso3.4.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM Nino 3.4 cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso1.2.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM Nino 1.2 cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = prcp.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM precipitation cors")
+
+
+hist(lake.cors$prcp.cor,xlim=c(-1,1))
+hist(lake.cors$enso3.4.cor,xlim=c(-1,1))
+hist(lake.cors$enso1.2.cor,xlim=c(-1,1))
+
+
+unique(lake.cors[lake.cors$prcp.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$enso3.4.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$enso1.2.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$mei.pvalue<0.05,]$lakeid)
+```
+
+Correlation Analysis ENSO (chlorophyll Duration)
+
+```{r Duration correlation}
+#ENSO
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA,"enso3.4.pvalue"=NA,"enso3.4.cor"=NA,"enso1.2.pvalue"=NA,"enso1.2.cor"=NA)
+
+lake.id<-unique(lakes.nino$lagoslakeid)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.nino %>% subset(lagoslakeid==lake.id[i])
+prcp.cor<-cor.test(hold$dur,hold$june_prcp)
+enso3.4.cor<-cor.test(hold$dur,hold$may_prcp)
+enso1.2.cor<-cor.test(hold$dur,hold$apr_prcp)
+string<-data.frame("prcp.pvalue"=prcp.cor$p.value,
+                   "prcp.cor"=prcp.cor$estimate,
+                   "enso3.4.pvalue"=enso3.4.cor$p.value,
+                   "enso3.4.cor"=enso3.4.cor$estimate,
+                   "enso1.2.pvalue"=enso1.2.cor$p.value,
+                   "enso1.2.cor"=enso1.2.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.nino[,c(2,5,6)])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso3.4.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM Nino 3.4 cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso1.2.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM Nino 1.2 cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = prcp.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM precipitation cors")
+
+hist(lake.cors$prcp.cor,xlim=c(-1,1))
+hist(lake.cors$enso3.4.cor,xlim=c(-1,1))
+hist(lake.cors$enso1.2.cor,xlim=c(-1,1))
+
+unique(lake.cors[lake.cors$prcp.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$enso3.4.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$enso1.2.pvalue<0.05,]$lakeid)
+```
+
+Does correlation change over space?
+
+```{r Change over space?}
+#correlation changes from south to north for duration, not for 95chl or mean chl
+cor.test(lake.cors$lat,lake.cors$enso3.4.cor)
+plot(lake.cors$lat,lake.cors$enso3.4.cor)
+
+cor.test(lake.cors$lat,lake.cors$enso1.2.cor)
+plot(lake.cors$lat,lake.cors$enso1.2.cor)
+
+cor.test(lake.cors$lat,lake.cors$prcp.cor)
+plot(lake.cors$lat,lake.cors$prcp.cor)
+
+#Predictive power (R^2) does not change for duration, 95chl, or mean chl
+cor.test(lake.cors$lat,(lake.cors$enso3.4.cor)^2)
+plot(lake.cors$lat,(lake.cors$enso3.4.cor)^2)
+
+cor.test(lake.cors$lat,(lake.cors$enso1.2.cor)^2)
+plot(lake.cors$lat,(lake.cors$enso1.2.cor)^2)
+
+cor.test(lake.cors$lat,(lake.cors$prcp.cor)^2)
+plot(lake.cors$lat,(lake.cors$prcp.cor)^2)
+```
+
+Extreme events cors
+
+```{r Extreme events correlations}
+#lakes.prcp.daily <- read.csv("~/Desktop/PhD/LAGOS_forecasts/data/MonthlyEELagos.csv")
+lakes.prcp.daily<-read.csv("~/Desktop/PhD/LAGOS_forecasts/data/LagosMAMJdata_secchi_chl.csv")
+lakes.prcp.daily<-na.omit(lakes.prcp.daily)
+
+lakes.nino$total_ee<-rowSums(lakes.prcp.daily[,c("june_ee","may_ee","apr_ee","mar_ee")])
+#ENSO
+
+lake.cors<-data.frame("dur.pvalue"=NA,"dur.cor"=NA,"chl95.pvalue"=NA,"chl95.cor"=NA,"mean.pvalue"=NA,"mean.cor"=NA)
+
+lakes.prcp.daily<-lakes.prcp.daily[order(lakes.prcp.daily$year),]
+lake.id<-na.omit(unique(lakes.prcp.daily$lagoslakeid))
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.prcp.daily %>% subset(lagoslakeid==lake.id[i])
+dur.cor<-cor.test(hold$total_ee,hold$dur)
+chl95.cor<-cor.test(hold$total_ee,hold$chl95)
+mean.cor<-cor.test(hold$total_ee,hold$mean_chl)
+string<-data.frame("dur.pvalue"=dur.cor$p.value,
+                   "dur.cor"=dur.cor$estimate,
+                   "chl95.pvalue"=chl95.cor$p.value,
+                   "chl95.cor"=chl95.cor$estimate,
+                   "mean.pvalue"=mean.cor$p.value,
+                   "mean.cor"=mean.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.prcp.daily[,c("year","mean_lat","mean_long")])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = dur.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "EE - duration cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = chl95.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "EE - severity cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = mean.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "EE mean cors")
+
+hist(lake.cors$dur.cor,xlim=c(-1,1))
+hist(lake.cors$chl95.cor,xlim=c(-1,1))
+hist(lake.cors$mean.cor,xlim=c(-1,1))
+
+
+#Removes some of the points to merge
+#merge.daily<-lakes.prcp.daily[,c(1,2,8)]
+#lakes.nino<-merge(lakes.nino,merge.daily,by=c("lagoslakeid","year"))
+```
+Does correlation change over trophic status?
+
+```{r Change over trophic status?}
+
+lake.id<-unique(lakes.nino$lagoslakeid)
+
+
+lakes.tmp<-group_by(lakes.nino, lagoslakeid)
+lakes.tmp <- summarize(lakes.tmp, 
+                      lake.mean.chl  = mean(mean_chl, na.rm = TRUE))
+
+#TSI 1 = oligotrophic, 4 = hypereutrophic
+lakes.tmp$TSI[lakes.tmp$lake.mean.chl<=2.6] <- 1
+lakes.tmp$TSI[lakes.tmp$lake.mean.chl>2.6 & lakes.tmp$lake.mean.chl<=20] <- 2
+lakes.tmp$TSI[lakes.tmp$lake.mean.chl>20] <- 3
+
+#lakes.tmp$TSI[lakes.tmp$lake.mean.chl>20 & lakes.tmp$lake.mean.chl<=56] <- 3
+#lakes.tmp$TSI[lakes.tmp$lake.mean.chl>56] <- 4
+
+lakes.tmp$TSI<-as.numeric(lakes.tmp$TSI)
+
+#mostly mesotrophic lakes
+hist(lakes.tmp$TSI)
+
+
+#look at correlation b/w mean trophic status and predictive power of hydroclimate variables on bloom characteristics
+lakes.tmp<-lakes.tmp[order(lakes.tmp$lagoslakeid),]
+lake.cors<-lake.cors[order(lake.cors$lakeid),]
+lakes.tmp[,c(4,5,6,7)]<-lake.cors[,c(2,4,6,7)]
+
+
+
+cor.test((lakes.tmp$dur.cor)^2,lakes.tmp$TSI)
+cor.test((lakes.tmp$enso3.4.cor)^2,lakes.tmp$TSI)
+cor.test((lakes.tmp$enso1.2.cor)^2,lakes.tmp$TSI)
+plot(lakes.tmp$TSI,(lakes.tmp$prcp.cor)^2)
+plot(lakes.tmp$TSI,(lakes.tmp$enso3.4.cor)^2)
+plot(lakes.tmp$TSI,(lakes.tmp$enso1.2.cor)^2)
+cor.test((lakes.tmp$prcp.cor),lakes.tmp$TSI)
+cor.test((lakes.tmp$enso3.4.cor),lakes.tmp$TSI)
+cor.test((lakes.tmp$enso1.2.cor),lakes.tmp$TSI)
+
+#maybe changing predictability for mean and severity with precip and enso 1.2?
+
+
+
+#Look into splitting out by trophic status index? 
+lakes.nino<-read.csv("~/Desktop/PhD/LAGOS_forecasts/data/LagosMAMJdata_secchi_chl.csv")
+lakes.nino$total_ee<-rowSums(lakes.nino[,c("june_ee","may_ee","apr_ee","mar_ee")])
+
+cor.test(lakes.nino$pc2[lakes.nino$TSI==3],lakes.nino$mean_chl[lakes.nino$TSI==3])
+plot(lakes.nino$june_ee[lakes.nino$TSI==3],lakes.nino$chl95[lakes.nino$TSI==3])
+
+
+cor.test(lakes.nino$total_ee,lakes.nino$secchi)
+plot(lakes.nino$total_ee,lakes.nino$secchi)
+
+```
+
+Mean Predictive power
+
+```{r Mean Predictive Power}
+
+lakes.nino %>%
+  group_by(TSI) %>%
+  summarise(meantotalprcp = mean(total_prcp,na.rm=TRUE),
+            EE = mean(total_ee,na.rm=TRUE),
+            pc1 = mean(pc1,na.rm=TRUE),
+            secchi=mean(secchi,na.rm=T),
+            dur = mean(dur,na.rm=T))
+
+```
+
+Does splitting out the eutrophic lakes help?
+
+```{r Split out eutrophic lakes}
+lakes.tsi<-merge(lakes.tmp[, c("lagoslakeid", "TSI")], lakes.nino, by="lagoslakeid")
+lakes.tsi<-lakes.tsi[,-c(10,11,15)]
+
+lakes.eu<-lakes.tsi[lakes.tsi$TSI==3,]
+lakes.eu<-lakes.eu[order(lakes.eu$year),]
+```
+
+Eutrophic lakes correlations - not much
+
+```{r Eutrophic lakes correlation}
+
+#ENSO
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA,"enso3.4.pvalue"=NA,"enso3.4.cor"=NA,"enso1.2.pvalue"=NA,"enso1.2.cor"=NA,"mei.pvalue"=NA, "mei.cor"=NA)
+
+lake.id<-unique(lakes.eu$lagoslakeid)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.eu %>% subset(lagoslakeid==lake.id[i])
+prcp.cor<-cor.test(hold$mean_chl,hold$layer)
+enso3.4.cor<-cor.test(hold$mean_chl,hold$nino3.4)
+enso1.2.cor<-cor.test(hold$mean_chl,hold$nino1.2)
+mei.cor <- cor.test(hold$mean_chl,hold$mam.mei)
+string<-data.frame("prcp.pvalue"=prcp.cor$p.value,
+                   "prcp.cor"=prcp.cor$estimate,
+                   "enso3.4.pvalue"=enso3.4.cor$p.value,
+                   "enso3.4.cor"=enso3.4.cor$estimate,
+                   "enso1.2.pvalue"=enso1.2.cor$p.value,
+                   "enso1.2.cor"=enso1.2.cor$estimate,
+                   "mei.pvalue" = mei.cor$p.value,
+                   "mei.cor" = mei.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.eu[,c(1,6,7)])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso3.4.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM Nino 3.4 cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = enso1.2.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM Nino 1.2 cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = prcp.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "MAM precipitation cors")
+
+hist(lake.cors$prcp.cor,xlim=c(-1,1))
+hist(lake.cors$enso3.4.cor,xlim=c(-1,1))
+hist(lake.cors$enso1.2.cor,xlim=c(-1,1))
+
+```
+
+Try splitting by climate indicies
+
+
+```{r Split by climate indicies}
+lakes.nipa<-lakes.nino
+
+lakes.nipa$total_ee<-rowSums(lakes.nipa[,c("EE","may_ee","apr_ee","mar_ee")])
+
+lakes.phase <- lakes.nipa[lakes.nipa$nao<0,]
+nrow(lakes.phase)
+lakes.phase<-na.omit(lakes.phase)
+
+
+
+#ENSO
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA,"pc1.pvalue"=NA,"pc1.cor"=NA,"pc2.pvalue"=NA,"pc2.cor"=NA,"ee.pvalue"=NA, "ee.cor"=NA)
+
+lake.id<-unique(lakes.phase$lagoslakeid)
+
+#for positive phase mei
+#lakes.phase<-lakes.phase[lakes.phase$lagoslakeid!=2329&lakes.phase$lagoslakeid!=3092&lakes.phase$lagoslakeid!=1080&lakes.phase$lagoslakeid!=203&lakes.phase$lagoslakeid!=8213,]
+#lake.id<-lake.id[lake.id!=2329 &lake.id!=3092&lake.id!=1080&lake.id!=203&lake.id!=8213]
+
+
+#for negative phase mei
+# lakes.phase<-lakes.phase[lakes.phase$lagoslakeid!=96694,]
+# lake.id<-lake.id[lake.id!=96694]
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.phase %>% subset(lagoslakeid==lake.id[i])
+prcp.cor<-cor.test(hold$mean_chl,hold$total_prcp)
+pc1.cor<-cor.test(hold$mean_chl,hold$pc1)
+pc2.cor<-cor.test(hold$mean_chl,hold$pc2)
+ee.cor <- cor.test(hold$mean_chl,hold$total_ee)
+string<-data.frame("prcp.pvalue"=prcp.cor$p.value,
+                   "prcp.cor"=prcp.cor$estimate,
+                   "pc1.pvalue"=pc1.cor$p.value,
+                   "pc1.cor"=pc1.cor$estimate,
+                   "pc2.pvalue"=pc2.cor$p.value,
+                   "pc2.cor"=pc2.cor$estimate,
+                   "ee.pvalue" = ee.cor$p.value,
+                   "ee.cor" = ee.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.phase[,c("lagoslakeid","mean_long","mean_lat")])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+lake.cors$sig<-lake.cors$prcp.pvalue<0.05|lake.cors$pc1.pvalue<0.05|lake.cors$pc2.pvalue<0.05|lake.cors$ee.pvalue<0.05
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+# ggplot() + 
+#   geom_sf(data = states) +
+#   geom_sf(data = lake.cors.sf, aes(color = pc1.cor)) + 
+#   theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+#   labs(color = "MAMJ PC1 cors")
+# 
+# ggplot() + 
+#   geom_sf(data = states) +
+#   geom_sf(data = lake.cors.sf, aes(color = pc2.cor)) + 
+#   theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+#   labs(color = "MAMJ PC2 cors")
+# 
+# ggplot() + 
+#   geom_sf(data = states) +
+#   geom_sf(data = lake.cors.sf, aes(color = prcp.cor)) + 
+#   theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+#   labs(color = "MAMJ precipitation cors")
+# 
+# 
+# ggplot() + 
+#   geom_sf(data = states) +
+#   geom_sf(data = lake.cors.sf, aes(color = ee.cor)) + 
+#   theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+#   labs(color = "MAMJ EE cors")
+# 
+# hist(lake.cors$prcp.cor,xlim=c(-1,1))
+# hist(lake.cors$pc1.cor,xlim=c(-1,1))
+# hist(lake.cors$pc2.cor,xlim=c(-1,1))
+# hist(lake.cors$ee.cor,xlim=c(-1,1))
+# 
+# mean(lake.cors$prcp.cor^2)
+# mean(lake.cors$pc1.cor^2)
+# mean(lake.cors$pc2.cor^2)
+# mean(na.omit(lake.cors$ee.cor^2))
+
+sig.lakes<-lake.cors[lake.cors$prcp.pvalue<0.05|lake.cors$pc1.pvalue<0.05|lake.cors$pc2.pvalue<0.05|lake.cors$ee.pvalue<0.05,]
+
+#Percent lakes with significant correlation
+(nrow(sig.lakes)/131)*100
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color=sig)) + 
+  theme_bw() +  scale_fill_manual(values=c("FALSE"="red","TRUE"="blue")) +
+  labs(color = "Significant correlation")
+
+
+#naoplus_lakes <- lake.cors$sig
+
+#length(lake.id[naoplus_lakes==TRUE&naominus_lakes==TRUE])/131
+#both_sig<-naoplus_lakes==TRUE|naominus_lakes==TRUE
+#added_sig<-both_sig==TRUE & lake.cors$sig==FALSE
+
+
+
+#When splitting with NAO, 65% of lakes have at least one significant predictor for mean chl in at least one phase, compared to 58% when not splitting. 19.8% have significant predictors in both phases
+
+#When splitting with NAO, 46.6% of lakes have at least one significant predictor for duration, compared to 18.3% when not splitting. 7% have significant predictors in both phases
+
+#When splitting with NAO, 58.8% of lakes have at least one significant predictor for severity, compared to 52.7% when not splitting. 14.5% have significant predictors in both phases
+
+
+
+
+
+#predictors: pc1, pc2, MAMJ total precipitation, MAMJ extreme events
+
+```
+
+Export lakes data for NIPA
+
+```{r Export lakes data in NIPA format}
+lake.id <- na.omit(unique(lakes.nino$lagoslakeid))
+
+path <-"~/Desktop/PhD/Ideas/CSI-master/NIPA_CSI-master_R_compatible/NIPA/DATA/lagos/"
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.nino %>% subset(lagoslakeid==lake.id[i])
+
+hold <- hold  %>% complete(year = seq(min(hold$year), max(hold$year), by=1))
+
+hold[is.na(hold)] <- NaN
+
+mean_chl<-data.frame(hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl,hold$mean_chl)
+
+mean_chl
+
+names(mean_chl)[names(mean_chl) == "hold.mean_chl"] <- first(hold$year)
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.1"] <- last(hold$year)
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.2"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.3"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.4"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.5"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.6"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.7"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.8"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.9"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.10"] <- NA
+names(mean_chl)[names(mean_chl) == "hold.mean_chl.11"] <- NA
+
+mean_chl<-as.matrix(mean_chl)
+mean_chl<-rbind(colnames(mean_chl),mean_chl)
+mean_chl<-rbind(c(lake.id[i],NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA),mean_chl)
+
+
+name<-paste(lake.id[i],"txt", sep=".")
+filename<-paste(path,name,sep="/")
+
+write.table(mean_chl, file = filename,
+            sep = "\t", row.names = FALSE, col.names = FALSE, na="",quote = FALSE)
+
+}
+
+```
+
+Import and organize NIPA outputs
+
+```{r Organize NIPA outputs}
+lakes.nino<-read.csv("~/Desktop/PhD/LAGOS_forecasts/data/Lagos_ee_precip_chl.csv")
+
+nipa.output.full<-list.files("~/Desktop/PhD/Ideas/CSI-master/NIPA_CSI-master_R_compatible/NIPA/output",full.names = TRUE)
+
+pc1.full<-nipa.output.full[grepl("pc1",nipa.output.full)]
+pc2.full<-nipa.output.full[grepl("pc2",nipa.output.full)]
+
+nipa.output.files <-list.files("~/Desktop/PhD/Ideas/CSI-master/NIPA_CSI-master_R_compatible/NIPA/output")
+
+pc1.files<-nipa.output.files[grepl("pc1",nipa.output.files)]
+pc2.files<-nipa.output.files[grepl("pc2",nipa.output.files)]
+
+nipa<-data.frame("pc1"=NA,"pc2"=NA,"years"=NA,"lagoslakeid"=NA)
+
+for (i in 1:length(pc2.full)) {
+hold<-read.table(pc2.full[i], sep=",", header = TRUE)
+hold<-hold[,-1]
+hold<-cbind("pc1"=read.table(pc1.full[i], sep=",", header = TRUE)[,2],hold)
+hold$lagoslakeid <- parse_number(substr(pc1.files,1,6))[i]
+hold
+nipa<-rbind(nipa,hold)
+}
+nipa<-nipa[-1,]
+nipa
+
+
+org.df<-data.frame("pc1"=NA,"pc2"=NA,"years"=NA,"lagoslakeid"=NA)
+
+lake.id<-unique(nipa$lagoslakeid)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.nino[lakes.nino$lagoslakeid==lake.id[i],]
+yrs.index<-nipa[nipa$lagoslakeid==lake.id[i],]$years %in% hold$year
+hold2<-nipa[nipa$lagoslakeid==lake.id[i],]
+
+org.df<-rbind(org.df,hold2[yrs.index,])
+}
+
+org.df<-org.df[-1,]
+
+org.df<-org.df[order(org.df$years),]
+
+names(org.df)[names(org.df) == "years"] <- "year"
+
+
+
+#merge based on available data for nipa - will shrink dataframe
+lakes.nipa<-merge(org.df,lakes.nino,by=c("lagoslakeid","year"))
+#write.csv(lakes.prcp,"~/Desktop/NIPA_NAO46_Lagos.csv")
+
+sst.cor.analysis<-lakes.nipa[,c("lagoslakeid","year","pc1","pc2","mean_chl","chl95","dur","mean_long","mean_lat")]
+
+#write.csv(sst.cor.analysis,"~/Desktop/Lagos_SST_cors.csv")
+```
+
+
+```{r NIPA correlations with chlorophyll}
+
+#ENSO
+lake.cors<-data.frame("dur.pvalue"=NA,"dur.cor"=NA,"chl95.pvalue"=NA,"chl95.cor"=NA,"mean.pvalue"=NA,"mean.cor"=NA)
+lakes.nipa<-na.omit(lakes.nipa)
+lake.id<-unique(lakes.nipa$lagoslakeid)
+
+#lakes.nipa$total_prcp<-rowSums(lakes.nipa[,c("june_prcp","may_prcp","apr_prcp","mar_prcp")])
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.nipa %>% subset(lagoslakeid==lake.id[i])
+dur.cor<-cor.test(hold$pc1,hold$dur)
+chl95.cor<-cor.test(hold$pc1,hold$chl95)
+mean.cor<-cor.test(hold$pc1,hold$mean_chl)
+string<-data.frame("dur.pvalue"=dur.cor$p.value,
+                   "dur.cor"=dur.cor$estimate,
+                   "chl95.pvalue"=chl95.cor$p.value,
+                   "chl95.cor"=chl95.cor$estimate,
+                   "mean.pvalue"=mean.cor$p.value,
+                   "mean.cor"=mean.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.nipa[,c(1,8,9)])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = dur.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - duration cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = chl95.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - severity cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = mean.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - mean cors")
+
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = (mean.cor)^2)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - mean chl predictive power")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = (dur.cor)^2)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - duration predictive power")
+
+hist(lake.cors$dur.cor,xlim=c(-1,1))
+hist(lake.cors$chl95.cor,xlim=c(-1,1))
+hist(lake.cors$mean.cor,xlim=c(-1,1))
+
+
+length(unique(lakes.nipa$lagoslakeid))
+
+length(unique(lake.cors[lake.cors$mean.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$dur.pvalue<0.05,]$lakeid,
+  lake.cors[lake.cors$chl95.pvalue<0.05,]$lakeid))
+
+
+plot(lake.cors$long,lake.cors$mean.cor)
+```
+
+Look at differences in summary statistics between phases
+
+```{r}
+#larger difference in precip for MEI
+mean(lakes.nipa[lakes.nipa$mei>0,]$layer)-mean(lakes.nipa[lakes.nipa$mei<0,]$layer)
+mean(lakes.nipa[lakes.nipa$nao>0,]$layer)-mean(lakes.nipa[lakes.nipa$nao<0,]$layer)
+
+#larger difference in precip for EE
+mean(lakes.nipa[lakes.nipa$mei>0,]$EE)-mean(lakes.nipa[lakes.nipa$mei<0,]$EE)
+mean(lakes.nipa[lakes.nipa$nao>0,]$EE)-mean(lakes.nipa[lakes.nipa$nao<0,]$EE)
+
+#Larger difference in mean chlorophyll for MEI
+mean(lakes.nipa[lakes.nipa$mei>0,]$mean_chl)-mean(lakes.nipa[lakes.nipa$mei<0,]$mean_chl)
+mean(lakes.nipa[lakes.nipa$nao>0,]$mean_chl)-mean(lakes.nipa[lakes.nipa$nao<0,]$mean_chl)
+
+#Larger difference in mean chlorophyll for duration
+mean(lakes.nipa[lakes.nipa$mei>0,]$dur)-mean(lakes.nipa[lakes.nipa$mei<0,]$dur)
+mean(lakes.nipa[lakes.nipa$nao>0,]$dur)-mean(lakes.nipa[lakes.nipa$nao<0,]$dur)
+
+
+cor.test(lakes.nipa[lakes.nipa$mei>0,]$chl95,lakes.nipa[lakes.nipa$mei>0,]$EE)
+cor.test(lakes.nipa[lakes.nipa$mei<0,]$chl95,lakes.nipa[lakes.nipa$mei<0,]$EE)
+
+cor.test(lakes.nipa[lakes.nipa$nao>0,]$mean_chl,lakes.nipa[lakes.nipa$nao>0,]$mar_prcp)
+cor.test(lakes.nipa[lakes.nipa$nao<0,]$mean_chl,lakes.nipa[lakes.nipa$nao<0,]$mar_prcp)
+
+cor.test(lakes.nipa$june_prcp,lakes.nipa$dur)
+plot(lakes.nipa$june_prcp,lakes.nipa$dur)
+```
+
+FAI
+
+```{r Organize FAI Output}
+fai<-read.csv("~/Desktop/PhD/LAGOS_forecasts/data/LAGOS_FAI.csv")
+id.dict <- read.csv("~/Desktop/PhD/LAGOS_forecasts/data/lakeid.csv")
+fai<-na.omit(fai)
+
+fai$system.index<-as.numeric(substr(fai$system.index,1,3))
+
+fai<-merge(fai,id.dict, by.x="system.index")
+
+fai$date<-as.Date(substr(fai$name,10,19))
+fai$year <- as.numeric(substr(fai$date,1,4))
+
+mean(fai$value)
+
+fai<-fai %>% group_by(lakeid, year) %>%summarise(mean_fai = mean(value))
+
+names(fai)[1] <- "lagoslakeid"
+
+#write.csv(fai,"~/Desktop/PhD/LAGOS_forecasts/data/FAI_cleaned.csv")
+
+```
+
+
+Soil Moisture Data
+
+```{r Organize Soil Moisture Data}
+lakes<-read.csv("~/Desktop/PhD/LAGOS_forecasts/data/Lagos_ee_precip_chl.csv")
+lakes<-lakes[,c("year","lagoslakeid","mean_long","mean_lat")]
+lakes<-lakes[order(lakes$year),]
+
+lakes.sp<-SpatialPointsDataFrame(coords=lakes[,c('mean_long','mean_lat')], 
+                       data=lakes, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+nc.files<-list.files("~/Desktop/PhD/LAGOS_forecasts/data/SoilMoisture",full.names = T)
+
+nc.files<-nc.files[-c(1:4)] #remove 1981
+
+#Individual months soil moisture
+lakes.sm <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_long"=NA, "mean_lat"=NA,"mar_sm"=NA)
+
+
+#March
+for (i in seq(from=1, to=length(nc.files),by=4)) {
+#Get NetCDF data open and create a raster
+nc_data <- nc_open(nc.files[i])
+lon <- ncvar_get(nc_data, "lon")
+lat <- ncvar_get(nc_data, "lat", verbose = F)
+t <- ncvar_get(nc_data, "time")
+ndvi.array <- ncvar_get(nc_data, "sm")
+fillvalue <- ncatt_get(nc_data, "sm", "_FillValue")
+ndvi.array[ndvi.array == fillvalue$value] <- NA
+RS<- raster(t(ndvi.array), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+year<-abs(as.numeric(parse_number(substr(nc.files[i],104,108)))) #bootleg way to get year from the file name
+
+if (nrow(lakes.sp[lakes.sp@data$year==year,])>0) {
+year<-abs(as.numeric(parse_number(substr(nc.files[i],105,108))))
+ex<-lakes.sp[lakes.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[5] <- "mar_sm"
+hold<-hold[,c("year","lagoslakeid","mean_long","mean_lat","mar_sm")]
+lakes.sm<-rbind(lakes.sm,hold)
+}
+else
+  next
+}
+mar<-lakes.sm[-1,c("lagoslakeid","mar_sm","year")]
+
+
+
+#April
+lakes.sm <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_long"=NA, "mean_lat"=NA,"apr_sm"=NA)
+for (i in seq(from=1, to=length(nc.files),by=4)) {
+#Get NetCDF data open and create a raster
+nc_data <- nc_open(nc.files[i+1])
+lon <- ncvar_get(nc_data, "lon")
+lat <- ncvar_get(nc_data, "lat", verbose = F)
+t <- ncvar_get(nc_data, "time")
+ndvi.array <- ncvar_get(nc_data, "sm")
+fillvalue <- ncatt_get(nc_data, "sm", "_FillValue")
+ndvi.array[ndvi.array == fillvalue$value] <- NA
+RS<- raster(t(ndvi.array), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+year<-abs(as.numeric(parse_number(substr(nc.files[i],104,108)))) #bootleg way to get year from the file name
+
+if (nrow(lakes.sp[lakes.sp@data$year==year,])>0) {
+year<-abs(as.numeric(parse_number(substr(nc.files[i],105,108))))
+ex<-lakes.sp[lakes.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[5] <- "apr_sm"
+hold<-hold[,c("year","lagoslakeid","mean_long","mean_lat","apr_sm")]
+lakes.sm<-rbind(lakes.sm,hold)
+}
+else
+  next
+}
+apr<-lakes.sm[-1,c("lagoslakeid","apr_sm","year")]
+
+
+#May
+lakes.sm <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_long"=NA, "mean_lat"=NA,"may_sm"=NA)
+for (i in seq(from=1, to=length(nc.files),by=4)) {
+#Get NetCDF data open and create a raster
+nc_data <- nc_open(nc.files[i+2])
+lon <- ncvar_get(nc_data, "lon")
+lat <- ncvar_get(nc_data, "lat", verbose = F)
+t <- ncvar_get(nc_data, "time")
+ndvi.array <- ncvar_get(nc_data, "sm")
+fillvalue <- ncatt_get(nc_data, "sm", "_FillValue")
+ndvi.array[ndvi.array == fillvalue$value] <- NA
+RS<- raster(t(ndvi.array), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+year<-abs(as.numeric(parse_number(substr(nc.files[i],104,108)))) #bootleg way to get year from the file name
+
+if (nrow(lakes.sp[lakes.sp@data$year==year,])>0) {
+year<-abs(as.numeric(parse_number(substr(nc.files[i],105,108))))
+ex<-lakes.sp[lakes.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[5] <- "may_sm"
+hold<-hold[,c("year","lagoslakeid","mean_long","mean_lat","may_sm")]
+lakes.sm<-rbind(lakes.sm,hold)
+}
+else
+  next
+}
+may<-lakes.sm[-1,c("lagoslakeid","may_sm","year")]
+
+
+#June
+lakes.sm <- data.frame("year"=NA,"lagoslakeid"=NA,"mean_long"=NA, "mean_lat"=NA,"june_sm"=NA)
+for (i in seq(from=1, to=length(nc.files),by=4)) {
+#Get NetCDF data open and create a raster
+nc_data <- nc_open(nc.files[i+3])
+lon <- ncvar_get(nc_data, "lon")
+lat <- ncvar_get(nc_data, "lat", verbose = F)
+t <- ncvar_get(nc_data, "time")
+ndvi.array <- ncvar_get(nc_data, "sm")
+fillvalue <- ncatt_get(nc_data, "sm", "_FillValue")
+ndvi.array[ndvi.array == fillvalue$value] <- NA
+RS<- raster(t(ndvi.array), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+year<-abs(as.numeric(parse_number(substr(nc.files[i],104,108)))) #bootleg way to get year from the file name
+
+if (nrow(lakes.sp[lakes.sp@data$year==year,])>0) {
+year<-abs(as.numeric(parse_number(substr(nc.files[i],105,108))))
+ex<-lakes.sp[lakes.sp@data$year==year,]
+hold<-raster::extract(RS, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+hold <- as.data.frame(hold)
+names(hold)[5] <- "june_sm"
+hold<-hold[,c("year","lagoslakeid","mean_long","mean_lat","june_sm")]
+lakes.sm<-rbind(lakes.sm,hold)
+}
+else
+  next
+}
+june<-lakes.sm[-1,c("lagoslakeid","june_sm","year")]
+
+
+soil_moisture<-cbind(june,"may_sm"=may$may_sm,"apr_sm"=apr$apr_sm,"mar_sm"=mar$mar_sm)
+
+soil_moisture$mean_sm<-rowMeans(soil_moisture[,c("june_sm","may_sm","apr_sm","mar_sm")])
+
+#write.csv(soil_moisture,"~/Desktop/lagos_sm.csv")
+```
+
+Look at SST correlation analysis with chlorophyll
+
+```{r Global SST correlations}
+sstcor<-read.csv("~/Desktop/PhD/LAGOS_forecasts/LAGOS_sstchlcor/LAGOS_sst_cors.csv")
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+
+lakes.nipa<-sstcor
+#ENSO
+lake.cors<-data.frame("dur.pvalue"=NA,"dur.cor"=NA,"chl95.pvalue"=NA,"chl95.cor"=NA,"mean.pvalue"=NA,"mean.cor"=NA)
+lakes.nipa<-na.omit(lakes.nipa)
+lake.id<-unique(lakes.nipa$lagoslakeid)
+
+#lakes.nipa$total_prcp<-rowSums(lakes.nipa[,c("june_prcp","may_prcp","apr_prcp","mar_prcp")])
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.nipa %>% subset(lagoslakeid==lake.id[i])
+dur.cor<-cor.test(hold$pc1,hold$dur)
+chl95.cor<-cor.test(hold$pc1,hold$chl95)
+mean.cor<-cor.test(hold$pc1,hold$mean_chl)
+string<-data.frame("dur.pvalue"=dur.cor$p.value,
+                   "dur.cor"=dur.cor$estimate,
+                   "chl95.pvalue"=chl95.cor$p.value,
+                   "chl95.cor"=chl95.cor$estimate,
+                   "mean.pvalue"=mean.cor$p.value,
+                   "mean.cor"=mean.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+}
+
+
+lake.geom<-unique(lakes.nipa[,c("lagoslakeid","mean_long","mean_lat")])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+
+
+#Correlation maps
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = dur.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - duration cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = chl95.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - severity cors")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = mean.cor)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - mean cors")
+
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = (mean.cor)^2)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - mean chl predictive power")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color = (dur.cor)^2)) + 
+  theme_bw() + scale_color_gradient2(low = "blue",mid="white", high = "red") +
+  labs(color = "PC1 nipa mei - duration predictive power")
+
+hist(lake.cors$dur.cor,xlim=c(-1,1))
+hist(lake.cors$chl95.cor,xlim=c(-1,1))
+hist(lake.cors$mean.cor,xlim=c(-1,1))
+
+
+length(unique(lakes.nipa$lagoslakeid))
+
+length(unique(lake.cors[lake.cors$mean.pvalue<0.05,]$lakeid))
+
+#states.sub<-filter(states, ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"))
+#states.sub<-filter(states, ID %in% c("new york","vermont","rhode island","maine","pennsylvania"))
+states.sub<-filter(states, ID %in% c("new york","wisconsin","minnesota","vermont","rhode island","maine","pennsylvania","ohio","missouri"))
+state.subset<-as.data.frame(lake.cors.states.sf[lake.cors.states.sf$ID %in% states.sub$ID,"lakeid"])
+
+lake.cors.states.sf<-st_join(lake.cors.sf,states)
+
+hist(lake.cors[lake.cors$lakeid %in% state.subset$lakeid,]$mean.cor^2)
+mean(lake.cors[lake.cors$lakeid %in% state.subset$lakeid,]$mean.cor^2)
+
+sst.cor.df<-data.frame("mean.sst.cor"=NA,"State"=NA)
+
+for (i in 1:nrow(states.sub)) {
+  ID<-states.sub$ID[i]
+  state.subset<-as.data.frame(lake.cors.states.sf[lake.cors.states.sf$ID %in% states.sub$ID[i],"lakeid"])
+  sstmeancor<-mean(lake.cors[lake.cors$lakeid %in% state.subset$lakeid,]$mean.cor^2)
+  sst.cor.df<-rbind(sst.cor.df,data.frame("mean.sst.cor"=sstmeancor,"State"=ID))
+}
+
+
+
+barplot(names.arg=sst.cor.df$State,sst.cor.df$mean.sst.cor, horiz=F, cex.names = 0.5,ylab="R^2",ylim=c(0,1))
+
+
+lm_preds<-data.frame("Observed"=NA,"Predicted"=NA,"lagoslakeid"=NA)
+
+for (i in 1:length(lake.id)) {
+  hold<-lakes.nipa %>% subset(lagoslakeid==lake.id[i])
+  lm<-lm(hold$mean_chl~hold$pc1)
+  lm_preds<-rbind(lm_preds,data.frame("Observed"=hold$mean_chl,"Predicted"=lm$fitted.values,"lagoslakeid"=hold$lagoslakeid))
+}
+
+cor.test(lm_preds$Observed,lm_preds$Predicted)
+
+plot(lm_preds$Observed,lm_preds$Predicted, col=lm_preds$lagoslakeid, xlab="Observed",ylab="Predicted",main="All Lakes (R^2=0.83)")
+
+plot(lm$fitted.values, type="l", col="green") + lines(hold$mean_chl)
+
+
+
+
+```
+
+
+
+
+
+

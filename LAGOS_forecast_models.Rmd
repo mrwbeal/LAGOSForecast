@@ -1,0 +1,2567 @@
+
+This Notebook is used to look more deeply into developing LAGOS forecasts
+
+Libraries
+```{r Libraries, warning=FALSE}
+library(LAGOSNE)
+library(dplyr)
+library(ggplot2)
+library(maps)
+library(sf)
+library(devtools) #needed to download prism from github
+library(reshape2) ##melting dataframes
+library(raster) ##working with raster data
+library(sp) ##manipulationg spatial data
+library(prism) ##prism data access
+library(ggmap)
+library(lubridate)
+library(nlme)
+library(rgdal)
+library(dataRetrieval)
+library(tidyr)
+library(readr)
+library(png)
+library(tidyverse)
+library(caret)
+library(pls)
+library(fitdistrplus)
+#library(plsVarSel)
+library(verification)
+library(psych)
+library(ggpubr)
+library(RColorBrewer)
+```
+
+Data
+
+```{r Data}
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+
+#data with lake info
+lakeinfo <-read.csv("lake_info.csv")
+
+
+#SSTs
+mwsst <- read.csv("MW_SSTgrids_10lakes_19.csv")
+nesst <- read.csv("NE_SSTgrids_20lakes_19.csv")
+
+#MEI data
+mei.ind <- read.csv("MEI.csv")
+#mei.ind <- read.csv("Nino12.csv")
+#mei.ind <- read.csv("Nino34.csv")
+#mei.ind <- read.csv("Nino4.csv")
+
+#NAO data
+nao.ind <- read.csv("NAO.csv")
+
+#chl variables
+chl.df <- read.csv("chl_vars.csv")
+
+#Add in best cell data
+#bestcells_prcp<-read.csv("LAGOS_prcp_bestcells_update.csv")
+bestcells_prcp_mean<-read.csv("LAGOS_prcp_bestcells_mean.csv")
+bestcells_prcp_dur<-read.csv("LAGOS_prcp_bestcells_dur.csv")
+#bestcells_sm<-read.csv("LAGOS_sm_bestcells_update.csv")
+bestcells_sm_mean<-read.csv("LAGOS_sm_bestcells_mean.csv")
+bestcells_sm_dur<-read.csv("LAGOS_sm_bestcells_dur.csv")
+#bestcells_ee<-read.csv("LAGOS_ee_bestcells_update.csv")
+bestcells_ee_mean<-read.csv("LAGOS_ee_bestcells_mean.csv")
+bestcells_ee_dur<-read.csv("LAGOS_ee_bestcells_dur.csv")
+
+#Temperature Data
+Temp <- read.csv("MonthlyTmeanLAGOS_update.csv")
+
+#Merge
+chl.df<-merge(chl.df,bestcells_prcp_mean[,c("lagoslakeid","year","MAMJ_prcp")],by=c("lagoslakeid","year"),all.x=T)
+chl.df<-merge(chl.df,bestcells_prcp_dur[,c("lagoslakeid","year","MAMJ_prcp")],by=c("lagoslakeid","year"),all.x=T)
+names(chl.df)[12] <- "MAMJ_prcp_mean"
+names(chl.df)[13] <- "MAMJ_prcp_dur"
+
+
+chl.df<-merge(chl.df,bestcells_sm_mean[,c("lagoslakeid","year","MAMJ_sm")],by=c("lagoslakeid","year"),all.x=T)
+chl.df<-merge(chl.df,bestcells_sm_dur[,c("lagoslakeid","year","MAMJ_sm")],by=c("lagoslakeid","year"),all.x=T)
+names(chl.df)[14] <- "MAMJ_sm_mean"
+names(chl.df)[15] <- "MAMJ_sm_dur"
+
+chl.df<-merge(chl.df,bestcells_ee_mean[,c("lagoslakeid","year","MAMJ_ee")],by=c("lagoslakeid","year"),all.x=T)
+chl.df<-merge(chl.df,bestcells_ee_dur[,c("lagoslakeid","year","MAMJ_ee")],by=c("lagoslakeid","year"),all.x=T)
+names(chl.df)[16] <- "MAMJ_ee_mean"
+names(chl.df)[17] <- "MAMJ_ee_dur"
+
+chl.df<-merge(chl.df,Temp[,c("lagoslakeid","year","MAMJ_tmean")],by=c("lagoslakeid","year"),all.x=T)
+
+chl.df<-chl.df[,-3]
+
+chl.df[chl.df$mean_chl<=0.2&chl.df$year==2015,"mean_chl"] <- 1
+
+#chl.df<-chl.df[!(chl.df$mean_chl<=0.2&chl.df$year==2015),]
+
+par(mfrow=c(1,2))
+hist(chl.df$mean_chl, main="", xlab="JASO chlorophyll-a (ug/L)")
+hist(log(chl.df$mean_chl), main="",ylab="", xlab="JASO log(chlorophyll-a) (ug/L)", xlim=c(-2,6))
+
+#Log Chlorophyll-a?
+chl.df$mean_chl<-log(chl.df$mean_chl)
+chl.df$mamj_chl<-log(chl.df$mamj_chl)
+
+
+chl.df[chl.df$year==2015,]
+
+#1 ug/L detection limit?
+
+
+acf(nesst$sst_pc1,col="goldenrod")
+acf(mwsst$sst_pc1, col="light blue")
+
+plot(nesst$year,nesst$sst_pc1,col="goldenrod",pch=20)
+plot(mwsst$year,mwsst$sst_pc1, col="light blue",pch=20)
+
+
+cor.test(pdo$MAMJ,mwsst$sst_pc1)
+cor.test(pdo$MAMJ,nesst$sst_pc1)
+
+```
+
+
+States
+```{r States, message=FALSE}
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+
+states2<-filter(states, ID %in% c("michigan","new york","wisconsin","minnesota","vermont","rhode island","maine","pennsylvania","ohio","missouri","iowa","illinois","indiana","massachusetts", "new hampshire","connecticut","new jersey","delaware","maryland"))
+
+states<-filter(states, ID %in% c("michigan","new york","wisconsin","minnesota","vermont","rhode island","maine","pennsylvania","ohio","missouri"))
+
+
+
+lakeinfo.sf<-st_as_sf(lakeinfo, coords = c("nhd_long", "nhd_lat"), crs = 4326)
+
+
+states.sub<-filter(states, ID %in% c("new york","vermont","rhode island","maine","michigan","wisconsin","minnesota","ohio","missouri","pennsylvania"))
+
+states.sub[states.sub$ID %in% c("new york","vermont","rhode island","maine","pennsylvania"), "cluster"] <- "Northeast"
+states.sub[states.sub$ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"), "cluster"] <- "Midwest"
+
+
+cluster.sf<- st_as_sf(chl.df, coords = c("mean_long", "mean_lat"), crs = 4326)
+
+
+sf_use_s2(FALSE)
+sub.sf<-st_join(cluster.sf,states.sub, join = st_within) 
+
+
+region_plot<-ggplot() + geom_sf(data=states.sub, aes(fill=cluster))+ 
+  geom_sf(data=states2, alpha=0.3) + geom_sf(data=sub.sf, size=0.3) + theme_bw() +
+  labs(fill = "") + scale_fill_manual(values = c("light blue","goldenrod"))
+
+ggplot() + geom_sf(data=states.sub)+ 
+  geom_sf(data=states2, alpha=0.3) + geom_sf(data=sub.sf, size=0.3) + theme_bw()
+
+sub.sf[sub.sf$ID %in% c("new york","vermont","rhode island","maine", "pennsylvania"), "cluster"] <- "NE"
+sub.sf[sub.sf$ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"), "cluster"] <- "MW"
+
+
+
+#sub.sf<-na.omit(sub.sf)
+
+nesst$cluster <- "NE"
+mwsst$cluster <- "MW"
+
+coords <- sub.sf %>% st_coordinates()
+
+sub.sf$mean_long <- coords[,1]
+sub.sf$mean_lat <- coords[,2]
+sub.sf<-sub.sf %>% st_drop_geometry()
+
+chl.df<-merge(as.data.frame(sub.sf,xy=T),rbind(mwsst,nesst),by=c("year","cluster"))
+
+se <- function(x) sd(x,na.rm=T)/sqrt(length(x))
+
+cluster_mean<-chl.df %>%
+  group_by(cluster,year) %>%
+  summarise(cluster_chl = mean(mean_chl,na.rm=TRUE),
+            cluster_se = se(mean_chl))
+
+number_lakes<-chl.df %>%
+  group_by(cluster,year) %>%
+  summarise(cluster_chl = sum(mean_chl>-999))
+
+
+
+
+cluster_mean$num_lakes<-as.character(number_lakes$cluster_chl)
+
+ggplot(data=cluster_mean, 
+            aes(x=year,y=cluster_chl, group=cluster, color=as.factor(cluster))) + 
+  geom_line(size=1) + 
+  geom_point(data=cluster_mean,
+             aes(x=year,y=cluster_chl, group=cluster, linetype=as.factor(cluster))) + 
+  labs(color="") + 
+  ylab("Log(chlorophyll-a) (ug/L)") + 
+  xlab("") + 
+  theme_classic() + scale_color_manual(values = c("light blue","goldenrod")) + geom_errorbar(aes(ymin=cluster_chl-cluster_se, ymax=cluster_chl+cluster_se), width=.2, position=position_dodge(0))
+
+
+lake_cluster_mean<-chl.df %>%
+  group_by(lagoslakeid,cluster,year) %>%
+  summarise(cluster_chl = mean(mean_chl,na.rm=TRUE),
+            cluster_se = se(mean_chl))
+
+
+yearly_plot<-ggplot() +   
+  geom_point(data=lake_cluster_mean,
+             aes(x=year,y=cluster_chl, group=lagoslakeid, color=as.factor(cluster)),alpha=0.2) + geom_line(data=cluster_mean, aes(x=year,y=cluster_chl, group=cluster, color=as.factor(cluster)),size=1) +
+  labs(color="") + 
+  ylab("Log(chlorophyll-a) (ug/L)") + 
+  xlab("") + 
+  theme_classic() + 
+  scale_color_manual(values = c("light blue","goldenrod")) + theme(legend.position = "none")
+
+
+
+lake_cluster_mean<-chl.df %>%
+  group_by(lagoslakeid,cluster,year) %>%
+  summarise(cluster_chl = mean(mean_chl,na.rm=TRUE),
+            cluster_se = se(mean_chl))
+
+
+
+
+
+  
+
+
+chl.df[chl.df$cluster=="MW"&chl.df$year==2013,]
+
+
+
+ggplot() + 
+  geom_line(data=number_lakes, 
+            aes(x=year,y=cluster_chl, group=cluster, linetype=as.factor(cluster))) + 
+  geom_point(data=number_lakes,
+             aes(x=year,y=cluster_chl, group=cluster, linetype=as.factor(cluster),label=cluster_chl)) + labs(linetype="Cluster") + ylab("Number of Lakes") + xlab("") + theme_classic()
+
+ 
+
+
+#Plot of climatology, annual timeseries, and map
+
+ggarrange(region_plot,                                                 # First row with scatter plot
+          ggarrange(yearly_plot, monthly_plot, ncol = 2), # Second row with box and dot plots
+          nrow = 2                                      # Labels of the scatter plot
+          ) 
+
+
+```
+
+Look for long term trends
+
+```{r Long term trends and SST correlations with NAO and MEI, message=FALSE}
+
+mean.agg<-aggregate(chl.df$mean_chl,by=list(chl.df$year),mean)
+plot(mean.agg$Group.1,mean.agg$x, type="l")
+
+sev.agg<-aggregate(chl.df$chl95,by=list(chl.df$year),mean)
+plot(sev.agg$Group.1,sev.agg$x, type="l")
+
+dur.agg<-aggregate(chl.df$dur,by=list(chl.df$year),mean)
+plot(dur.agg$Group.1,dur.agg$x, type="l")
+
+
+#Correlations b/w NAO, MEI and SST PCs
+
+nao.ind$MAMJ<-rowMeans(nao.ind[,c(3:7)],na.rm=T)
+#allsst_nao<-merge(nao.ind,allsst,by="year")
+mwsst_nao<-merge(nao.ind,mwsst,by="year")
+nesst_nao<-merge(nao.ind,nesst,by="year")
+
+# cor.test(allsst_nao$MAMJ,allsst_nao$sst_pc1)
+# cor.test(allsst_nao$MAMJ,allsst_nao$sst_pc2)
+# cor.test(allsst_nao$MAMJ,allsst_nao$sst_pc3)
+
+cor.test(mwsst_nao$MAMJ,mwsst_nao$sst_pc1)
+cor.test(mwsst_nao$MAMJ,mwsst_nao$sst_pc2)
+cor.test(mwsst_nao$MAMJ,mwsst_nao$sst_pc3)
+
+cor.test(nesst_nao$MAMJ,nesst_nao$sst_pc1)
+cor.test(nesst_nao$MAMJ,nesst_nao$sst_pc2)
+cor.test(nesst_nao$MAMJ,nesst_nao$sst_pc3)
+
+
+
+mei.ind$MAMJ<-rowMeans(mei.ind[,c(5:7)],na.rm=T)
+# allsst_mei<-merge(mei.ind,allsst,by="year")
+mwsst_mei<-merge(mei.ind,mwsst,by="year")
+nesst_mei<-merge(mei.ind,nesst,by="year")
+
+# cor.test(allsst_mei$MAMJ,allsst_mei$sst_pc1)
+# cor.test(allsst_mei$MAMJ,allsst_mei$sst_pc2)
+# cor.test(allsst_mei$MAMJ,allsst_mei$sst_pc3)
+
+cor.test(mwsst_mei$MAMJ,mwsst_mei$sst_pc1)
+cor.test(mwsst_mei$MAMJ,mwsst_mei$sst_pc2)
+cor.test(mwsst_mei$MAMJ,mwsst_mei$sst_pc3)
+
+cor.test(nesst_mei$MAMJ,nesst_mei$sst_pc1)
+cor.test(nesst_mei$MAMJ,nesst_mei$sst_pc2)
+cor.test(nesst_mei$MAMJ,nesst_mei$sst_pc3)
+
+
+#Correlations for NE
+
+nesst_mei<-nesst_mei[,-c(1:13,15,22,23)]
+nesst_nao<-nesst_nao[,-c(1:13,15,22,23)]
+
+
+nesst_mei<-melt(nesst_mei)
+nesst_mei$sig = NA
+nesst_nao<-melt(nesst_nao)
+nesst_nao$sig = NA
+
+vars = unique(nesst_mei$variable)
+
+for (i in 2:length(vars)) {
+  corhold<-cor.test(nesst_mei[nesst_mei$variable=="MAMJ",2],nesst_mei[nesst_mei$variable==vars[i],2])
+  if (corhold$p.value<=0.05) {
+   nesst_mei[nesst_mei$variable==vars[i],3] = TRUE
+  }
+  else
+  nesst_mei[nesst_mei$variable==vars[i],3] = FALSE
+}
+
+vars = unique(nesst_nao$variable)
+
+for (i in 2:length(vars)) {
+  corhold<-cor.test(nesst_nao[nesst_nao$variable=="MAMJ",2],nesst_nao[nesst_nao$variable==vars[i],2])
+  if (corhold$p.value<=0.05) {
+   nesst_nao[nesst_nao$variable==vars[i],3] = TRUE
+  }
+  else
+  nesst_nao[nesst_nao$variable==vars[i],3] = FALSE
+}
+
+nesst_mei$mamj <- nesst_mei[nesst_mei$variable=="MAMJ",2]
+nesst_mei<-nesst_mei[!nesst_mei$variable=="MAMJ",]
+
+nesst_mei<-nesst_mei[nesst_mei$variable=="sst_pc1"|nesst_mei$variable=="sst_pc2"|nesst_mei$variable=="sst_pc3",]
+
+a<-ggplot(nesst_mei, aes(x=mamj, y=value,color=sig)) + 
+  geom_point(aes()) + 
+  geom_smooth(method=lm, se=T, fullrange=TRUE)+ facet_grid(. ~variable) +
+  ggtitle("")+ stat_cor(method = "pearson", label.x = -1, label.y = 25) +
+  theme_bw() + scale_color_grey(start=0.6, end=0.2)+ ylab("Northeast") + xlab("")+
+  theme(legend.position="none")
+
+
+nesst_nao$mamj <- nesst_nao[nesst_nao$variable=="MAMJ",2]
+nesst_nao<-nesst_nao[!nesst_nao$variable=="MAMJ",]
+
+nesst_nao<-nesst_nao[nesst_nao$variable=="sst_pc1"|nesst_nao$variable=="sst_pc2"|nesst_nao$variable=="sst_pc3",]
+
+b<-ggplot(nesst_nao, aes(x=mamj, y=value,color=sig)) + 
+  geom_point(aes()) + 
+  geom_smooth(method=lm, se=T, fullrange=TRUE)+ facet_grid(. ~variable)+
+  ggtitle("")+ stat_cor(method = "pearson", label.x = -1, label.y = 25) +
+  theme_bw() + scale_color_grey(start=0.6, end=0.2) + ylab("") + xlab("")+
+  theme(legend.position="none")
+
+
+
+
+#Correlations for MW
+
+mwsst_mei<-mwsst_mei[,-c(1:13,15,22,23)]
+mwsst_nao<-mwsst_nao[,-c(1:13,15,22,23)]
+
+mwsst_mei<-melt(mwsst_mei)
+mwsst_mei$sig = NA
+mwsst_nao<-melt(mwsst_nao)
+mwsst_nao$sig = NA
+
+vars<-unique(mwsst_mei$variable)
+
+for (i in 2:length(vars)) {
+  corhold<-cor.test(mwsst_mei[mwsst_mei$variable=="MAMJ",2],mwsst_mei[mwsst_mei$variable==vars[i],2])
+  if (corhold$p.value<=0.05) {
+   mwsst_mei[mwsst_mei$variable==vars[i],3] = TRUE
+  }
+  else
+  mwsst_mei[mwsst_mei$variable==vars[i],3] = FALSE
+}
+
+vars<-unique(mwsst_nao$variable)
+
+for (i in 2:length(vars)) {
+  corhold<-cor.test(mwsst_nao[mwsst_nao$variable=="MAMJ",2],mwsst_nao[mwsst_nao$variable==vars[i],2])
+  if (corhold$p.value<=0.05) {
+   mwsst_nao[mwsst_nao$variable==vars[i],3] = TRUE
+  }
+  else
+  mwsst_nao[mwsst_nao$variable==vars[i],3] = FALSE
+}
+
+
+mwsst_mei$mamj <- mwsst_mei[mwsst_mei$variable=="MAMJ",2]
+mwsst_mei<-mwsst_mei[!mwsst_mei$variable=="MAMJ",]
+
+mwsst_mei<-mwsst_mei[mwsst_mei$variable=="sst_pc1"|mwsst_mei$variable=="sst_pc2"|mwsst_mei$variable=="sst_pc3",]
+
+c<-ggplot(mwsst_mei, aes(x=mamj, y=value,color=sig)) + 
+  geom_point(aes()) + 
+  geom_smooth(method=lm, se=T, fullrange=TRUE)+ facet_grid(. ~variable) +
+  ggtitle("") + stat_cor(method = "pearson", label.x = -1, label.y = 25) +
+  theme_bw() + scale_color_grey(start=0.6, end=0.2)+ xlab("Multivariate ENSO Index") + ylab("Midwest") +
+  theme(legend.position="none")
+
+
+mwsst_nao$mamj <- mwsst_nao[mwsst_nao$variable=="MAMJ",2]
+mwsst_nao<-mwsst_nao[!mwsst_nao$variable=="MAMJ",]
+
+mwsst_nao<-mwsst_nao[mwsst_nao$variable=="sst_pc1"|mwsst_nao$variable=="sst_pc2"|mwsst_nao$variable=="sst_pc3",]
+
+d<-ggplot(mwsst_nao, aes(x=mamj, y=value,color=sig)) + 
+  geom_point(aes()) + 
+  geom_smooth(method=lm, se=T, fullrange=TRUE)+ facet_grid(. ~variable) +
+  ggtitle("") + stat_cor(method = "pearson", label.x = -1, label.y = 25) +
+  theme_bw() + scale_color_grey(start=0.2, end=0.2) + xlab("NAO Index")+
+  theme(legend.position="none") + ylab("")
+
+
+ggarrange(a,b,c,d)
+
+
+```
+
+
+Violin plots in different phases
+```{r Phase statistics}
+chl.df<-merge(chl.df,nao.ind[,c("year","MAMJ")],by="year")
+chl.df[chl.df$MAMJ>=0.5,"phase"] <- "Positive"
+chl.df[chl.df$MAMJ>0 & chl.df$MAMJ<0.5 ,"phase"] <- "Neutral Positive"
+chl.df[chl.df$MAMJ<0 & chl.df$MAMJ>-0.5,"phase"] <- "Neutral Negative"
+chl.df[chl.df$MAMJ<=-0.5,"phase"] <- "Negative"
+
+# chl.df<-merge(chl.df,mei.ind[,c("year","MAMJ")],by="year")
+# chl.df[chl.df$MAMJ>=0.5,"phase"] <- "Positive"
+# chl.df[chl.df$MAMJ>0 & chl.df$MAMJ<0.5 ,"phase"] <- "Neutral Positive"
+# chl.df[chl.df$MAMJ<0 & chl.df$MAMJ>-0.5,"phase"] <- "Neutral Negative"
+# chl.df[chl.df$MAMJ<=-0.5,"phase"] <- "Negative"
+
+
+
+ggplot(chl.df[chl.df$cluster=="MW",], aes(x=phase, y=mean_chl, fill=phase)) + 
+  geom_violin() + geom_boxplot(width=0.1, fill="white") + ylim(0,7) + scale_fill_manual(values=c("lightskyblue","lightskyblue1","tomato1","firebrick2")) + theme_classic() + ylab("Mean Log(Chlorophyll-a) (ug/L)")
+
+
+
+
+names(mean.agg)[1] <- "year"
+nao.chl.agg<-merge(mean.agg,nao.ind,by="year")
+z.cols<-nao.chl.agg$MAMJ>0
+z.cols[z.cols==TRUE] <- "blue"
+z.cols[z.cols==FALSE] <- "red"
+plot(nao.chl.agg$year,nao.chl.agg$x,type="b", col=z.cols,pch=16)
+
+
+mei.chl.agg<-merge(mean.agg,mei.ind,by="year")
+z.cols<-mei.chl.agg$MAMJ>0
+z.cols[z.cols==TRUE] <- "blue"
+z.cols[z.cols==FALSE] <- "red"
+plot(mei.chl.agg$year,mei.chl.agg$x,type="b", col=z.cols,pch=16)
+
+
+plot(nao.chl.agg$year,nao.chl.agg$x,type="b", col=z.cols,pch=16)
+plot(mei.chl.agg$year,mei.chl.agg$x,type="b", col=z.cols,pch=16)
+
+```
+
+Violin Plots for high vs. low chl years
+
+```{r}
+max(chl.df$mean_chl)
+min(chl.df$mean_chl)
+
+chl.df[chl.df$mean_chl>=56,"TSI"] <- "4"
+chl.df[chl.df$mean_chl>=20 & chl.df$mean_chl<56 ,"TSI"] <- "3"
+chl.df[chl.df$mean_chl>=2.6 & chl.df$mean_chl<20,"TSI"] <- "2"
+chl.df[chl.df$mean_chl<2.6,"TSI"] <- "1"
+
+chl.df
+
+ggplot(chl.df, aes(x=TSI, y=may_sm)) + 
+  geom_violin() + geom_boxplot(width=0.1)
+
+ggplot(chl.df, aes(x=TSI, y=log(mean_chl))) + 
+  geom_violin() + geom_boxplot(width=0.1)
+
+
+```
+
+
+
+```{r Correlations}
+predictand <- c("mean_chl","chl95","dur")
+m = 3 #1 = mean chl, 2 = chl95, 3 = duration
+
+
+lakes.phase<-chl.df
+
+#lakes.phase<-na.omit(lakes.phase)
+lake.id<-unique(lakes.phase$lagoslakeid)
+
+#Remove lakes that have durations of almost all 1 or 0
+if (m==3) {
+    for (d in 1:length(lake.id)) {
+      hold<-lakes.phase %>% subset(lagoslakeid==lake.id[d])
+      if (sum(as.numeric(hold$dur==1))/length(hold$dur)>=0.75|sum(as.numeric(hold$dur==0))/length(hold$dur)>=0.75) {
+        lakes.phase<-lakes.phase %>% subset(lagoslakeid!=lake.id[d])
+      }
+    }
+}
+
+
+#Choose best cell predictor set for magnitude or duration
+if (m==1) { #If magnitude, remove duration fields and rename
+  lakes.phase<-lakes.phase[,-which(names(lakes.phase) %in% c("MAMJ_prcp_dur","MAMJ_ee_dur","MAMJ_sm_dur"))]
+  colnames(lakes.phase)[which(colnames(lakes.phase) %in% c("MAMJ_prcp_mean","MAMJ_ee_mean","MAMJ_sm_mean"))] <-c("MAMJ_prcp","MAMJ_sm","MAMJ_ee")
+} else{ #If duration, remove magnitude fields and rename
+  lakes.phase<-lakes.phase[,-which(names(lakes.phase) %in% c("MAMJ_prcp_mean","MAMJ_ee_mean","MAMJ_sm_mean"))]
+  colnames(lakes.phase)[which(colnames(lakes.phase) %in% c("MAMJ_prcp_dur","MAMJ_ee_dur","MAMJ_sm_dur"))] <-c("MAMJ_prcp","MAMJ_sm","MAMJ_ee")
+}
+
+
+
+
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA,
+                      "pc1.pvalue"=NA,"pc1.cor"=NA,
+                      "pc2.pvalue"=NA,"pc2.cor"=NA,
+                      "pc3.pvalue"=NA,"pc3.cor"=NA,
+                      "ee.pvalue"=NA, "ee.cor"=NA,
+                      "Tmean.pvalue"=NA, "Tmean.cor"=NA,
+                      "sm.pvalue"=NA,"sm.cor"=NA,
+                      "mamj_chl.pvalue"=NA,"mamj_chl.cor"=NA)
+
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.phase %>% subset(lagoslakeid==lake.id[i])
+  if (nrow(hold)>5) {
+    
+
+prcp.cor<-corr.test(hold[,predictand[m]],hold$MAMJ_prcp, use="pairwise",adjust="none",ci=FALSE)
+#nao.cor <- cor.test(hold[,predictand[m]],hold$nao)
+pc1.cor<-corr.test(hold[,predictand[m]],hold$sst_pc1, use="pairwise",adjust="none",ci=FALSE)
+pc2.cor<-corr.test(hold[,predictand[m]],hold$sst_pc2, use="pairwise",adjust="none",ci=FALSE)
+pc3.cor<-corr.test(hold[,predictand[m]],hold$sst_pc3, use="pairwise",adjust="none",ci=FALSE)
+ee.cor <- corr.test(hold[,predictand[m]],hold$MAMJ_ee, use="pairwise",adjust="none",ci=FALSE)
+Tmean.cor <- corr.test(hold[,predictand[m]],hold$MAMJ_tmean, use="pairwise",adjust="none",ci=FALSE)
+sm.cor <- corr.test(hold[,predictand[m]],hold$MAMJ_sm, use="pairwise",adjust="none",ci=FALSE)
+mamj_chl.cor <- corr.test(hold[,predictand[m]],hold$mamj_chl, use="pairwise",adjust="none",ci=FALSE)
+#mamj_dur.cor <- cor.test(hold[,predictand[j]],hold$mamj_dur)
+#FAI.cor <- cor.test(hold$mean_chl,hold$mean_fai)
+string<-data.frame("prcp.pvalue"=prcp.cor$p,
+                   "prcp.cor"=prcp.cor$r,
+                   "pc1.pvalue"=pc1.cor$p,
+                   "pc1.cor"=pc1.cor$r,
+                   "pc2.pvalue"=pc2.cor$p,
+                   "pc2.cor"=pc2.cor$r,
+                   "pc3.pvalue"=pc3.cor$p,
+                   "pc3.cor"=pc3.cor$r,
+                   "ee.pvalue" = ee.cor$p,
+                   "ee.cor" = ee.cor$r,
+                   "Tmean.pvalue"=Tmean.cor$p,
+                   "Tmean.cor"=Tmean.cor$r,
+                   "sm.pvalue"=sm.cor$p,
+                   "sm.cor"=sm.cor$r,
+                   "mamj_chl.pvalue" = mamj_chl.cor$p,
+                   "mamj_chl.cor"=mamj_chl.cor$r)
+lake.cors<-rbind(lake.cors,string)
+  }
+else
+  lakes.phase<-lakes.phase %>% subset(lagoslakeid!=lake.id[i])
+  next
+}
+
+
+
+lake.geom<-unique(lakes.phase[,c("lagoslakeid","mean_long","mean_lat")])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+lake.cors[is.na(lake.cors)==TRUE] <- 99
+
+lake.cors$sig<-lake.cors$prcp.pvalue<0.05|lake.cors$pc1.pvalue<0.05|lake.cors$pc2.pvalue<0.05|lake.cors$pc3.pvalue<0.05|lake.cors$ee.pvalue<0.05|lake.cors$Tmean.pvalue<0.05|lake.cors$sm.pvalue<0.05|lake.cors$mamj_chl.pvalue<0.05
+
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color=sig),size=0.8) + 
+  geom_sf(data=states2, alpha=0.2) +
+  theme_bw() +  scale_fill_manual(values=c("FALSE"="red","TRUE"="blue")) +
+  labs(color = "Significant correlation")
+
+
+
+
+nrow(lake.cors[lake.cors$sig==T,])
+nrow(lake.cors[lake.cors$sig==T,])/nrow(lake.cors) #percent of lakes with a significant correlation
+
+#log mean_chl - 71%  total_prcp, total_ee, all_tmean, mean_sm, pc1, pc2
+
+#lake.cors[lake.cors==99,] <- 0
+
+
+lake.cors$sstsig<-as.numeric(lake.cors$pc1.pvalue<=0.05|lake.cors$pc2.pvalue<0.05|lake.cors$pc3.pvalue<0.05)
+lake.cors$mamjchlsig<-as.numeric(lake.cors$mamj_chl.pvalue<=0.05)
+lake.cors$varsig <- lake.cors$sstsig+lake.cors$mamjchlsig
+
+lake.cors$othersig <- as.numeric(lake.cors$prcp.pvalue<0.05|lake.cors$ee.pvalue<0.05|lake.cors$Tmean.pvalue<0.05|lake.cors$sm.pvalue<0.05)
+
+lake.cors[lake.cors$othersig==1,"othersig"] <- "Other"
+lake.cors[lake.cors$sstsig==1,"sstsig"] <- "SST"
+lake.cors[lake.cors$mamjchlsig==1,"mamjchlsig"] <- "Pre-season chl"
+lake.cors[lake.cors$varsig==2,"varsig"] <- "Both"
+
+for (i in 1:nrow(lake.cors)) {
+  if (lake.cors[i,"varsig"]==1 & lake.cors[i,"sstsig"]=="SST") {
+    lake.cors[i,"varsig"] ="SST"
+  }
+  else if(lake.cors[i,"varsig"]==1 & lake.cors[i,"mamjchlsig"]=="Pre-season chl")
+    lake.cors[i,"varsig"] ="Pre-season chl"
+  else if(lake.cors[i,"varsig"]==0 & lake.cors[i,"othersig"]=="Other")
+    lake.cors[i,"varsig"] ="Other"
+    next()
+}
+
+lake.cors[lake.cors$sig==FALSE,"varsig"] <- "None"
+
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data=states2, alpha=0.2) +
+  geom_sf(data = lake.cors.sf, aes(color=as.factor(varsig)),size=0.8) + 
+  theme_bw() +  scale_color_manual(values=c("purple","gray","blue","green","red")) +
+  labs(color = "")
+
+table(lake.cors$varsig)
+
+hist(lake.cors$pc1.cor^2)
+hist(lake.cors$pc2.cor^2)
+hist(lake.cors$prcp.cor^2)
+hist(lake.cors$ee.cor^2)
+hist(lake.cors$Tmean.cor^2)
+hist(lake.cors$mamj_chl.cor^2)
+
+barplot(c(mean(lake.cors[lake.cors$pc1.pvalue<0.05,]$pc1.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$pc2.pvalue<0.05,]$pc2.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$pc3.pvalue<0.05,]$pc3.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$prcp.pvalue<0.05,]$prcp.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$ee.pvalue<0.05,]$ee.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$Tmean.pvalue<0.05,]$Tmean.cor^2,na.rm=T),
+mean(lake.cors[lake.cors$sm.pvalue<0.05,]$sm.cor^2,na.rm=T),
+mean(lake.cors[lake.cors$mamj_chl.pvalue<0.05,]$mamj_chl.cor^2,na.rm=T)),
+names.arg=c("SST pc1","pc2","pc3", "Precip", "EE","Temp","SM","pre.chl"),
+ylim=c(0,1),
+main="Rsquared in lakes with a significant predictor")
+
+
+nrow(lake.cors[lake.cors$sig==T,])
+nrow(lake.cors[lake.cors$sig==T,])/nrow(lake.cors) #percent of lakes with a significant correlation
+
+cor_by_cluster<-st_join(lake.cors.sf,states.sub,join=st_within)
+
+cor_by_cluster[cor_by_cluster$sig==TRUE,]
+
+
+cor_by_cluster[cor_by_cluster$sig==TRUE,] %>%
+  group_by(cluster) %>%
+  summarise(numlakes = sum(as.numeric(sig)))
+
+
+#magnitude.cors<-lake.cors
+
+#Hydroclimate predictors figure
+
+
+
+```
+
+
+```{r Regional Correlations}
+
+#basedata<-nao.df[nao.df$phase=="1"|nao.df$phase=="2",]
+#basedata<-nao.df[nao.df$phase=="3"|nao.df$phase=="4",]
+basedata<-nao.df
+
+
+total_cors <- data.frame("Predictor"="",
+                       "Pearson_corrs"=NA,
+                       "Pearson_pvals"=NA,
+                       "Spearman_corrs"=NA,
+                       "Spearman_pvals"=NA,
+                      "Num.NA"=NA)
+
+names <- names(basedata)
+
+
+
+for (i in 3:ncol(basedata)) {
+  for (j in 0:10) {
+  if(sum(is.na(basedata[,i]))==j){
+  pear <- cor.test(basedata$chl95, as.numeric(basedata[ ,i]) , method="pearson")
+  spear <- cor.test(basedata$chl95, as.numeric(basedata[ ,i]), method="spearman")
+total_cors <- rbind(total_cors, data.frame("Predictor"=names[i], "Pearson_corrs"=pear$estimate, "Pearson_pvals"=pear$p.value, "Spearman_corrs"=spear$estimate, "Spearman_pvals"=spear$p.value,"Num.NA"=j))
+  }
+  }
+}
+
+total_cors$significant <- total_cors$Pearson_pvals<=0.05 & total_cors$Spearman_pvals<=0.05
+
+
+
+total_cors$Predictand = "chl95"
+total_cors$phase = "pos"
+
+
+```
+
+Look at maps
+
+```{r Overlay NIPA maps}
+maps<-list.files("~/Desktop/PhD/Ideas/CSI-master/NIPA_CSI-master_R_compatible/NIPA/maps",full.names=T)
+
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+
+#states.sub<-filter(states, ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"))
+#states.sub<-filter(states, ID %in% c("new york","vermont","rhode island","maine","pennsylvania"))
+states.sub <- filter(states, ID %in% c("maine"))
+
+lake.cors.states.sf<-st_join(lake.cors.sf,states)
+
+state.subset<-as.data.frame(lake.cors.states.sf[lake.cors.states.sf$ID %in% states.sub$ID,"lakeid"])
+map.match<-paste(state.subset$lakeid,".png", sep="")
+
+index<-list.files("~/Desktop/PhD/Ideas/CSI-master/NIPA_CSI-master_R_compatible/NIPA/maps") %in% map.match
+
+maps<-maps[index]
+length(maps)
+
+par(mai=c(0,2.5,0,2.5))
+plot.new()
+for (i in 1:length(maps)) {
+  img = readPNG(maps[i])
+  img[,,4] = 0.05  # set alpha to semi-transparent
+  rasterImage(img, 0, 0, 1, 1)
+}
+```
+
+Build Forecasts & LOOCV
+
+```{r Build Forecasts & LOOCV}
+
+
+lakes.phase<-chl.df
+
+#Choose best cell predictor set for magnitude or duration
+if (m==1) { #If magnitude, remove duration fields and rename
+  lakes.phase<-lakes.phase[,-which(names(lakes.phase) %in% c("MAMJ_prcp_dur","MAMJ_ee_dur","MAMJ_sm_dur"))]
+  colnames(lakes.phase)[which(colnames(lakes.phase) %in% c("MAMJ_prcp_mean","MAMJ_ee_mean","MAMJ_sm_mean"))] <-c("MAMJ_prcp","MAMJ_sm","MAMJ_ee")
+} else{ #If duration, remove magnitude fields and rename
+  lakes.phase<-lakes.phase[,-which(names(lakes.phase) %in% c("MAMJ_prcp_mean","MAMJ_ee_mean","MAMJ_sm_mean"))]
+  colnames(lakes.phase)[which(colnames(lakes.phase) %in% c("MAMJ_prcp_dur","MAMJ_ee_dur","MAMJ_sm_dur"))] <-c("MAMJ_prcp","MAMJ_sm","MAMJ_ee")
+}
+
+
+
+#Create a Dataframe for predictions
+LAGOS_pcr <- data.frame("Predictions"=NA,"Observed"=NA,"Year"=NA, "lagoslakeid"=NA,"RMSE"=NA,"Rsquare"=NA,"PCR"=NA)
+
+#Select Predictors
+sig.cors<-lake.cors[lake.cors$sig==TRUE,c(1,3,5,7,9,11,13,15)]
+sig.cors[is.na(sig.cors)==TRUE] <- 99
+predictors<-data.frame("MAMJ_prcp"=NA,"sst_pc1"=NA,"sst_pc2"=NA,"sst_pc3"=NA,"MAMJ_ee"=NA,"MAMJ_tmean"=NA,"MAMJ_sm"=NA,"mamj_chl"=NA)
+
+
+for (i in 1:nrow(sig.cors)) {
+  for (j in 1:ncol(sig.cors)) {
+    predictors[i,j]<-as.numeric(sig.cors[i,j] < 0.05)
+  }
+}
+
+#How many lakes sst and mamj chl retained for
+# table(rowSums(predictors[,c("sst_pc1","sst_pc2","sst_pc3")])>0)
+# table(predictors[,c("mamj_chl")]>0)
+
+numberpreds<-rowSums(predictors[,c(1:8)])
+table(numberpreds)
+
+predictors$lagoslakeid = lake.cors[lake.cors$sig==T,"lakeid"]
+predictors<-na.omit(predictors)
+predsplot<-colSums(predictors)[-9]
+
+predictors[predictors$mamj_chl==0&predictors$sst_pc1==0&predictors$sst_pc2==0&predictors$sst_pc3==0,]
+
+predictors[predictors$MAMJ_prcp==1|predictors$MAMJ_ee==1|predictors$MAMJ_sm==1|predictors$MAMJ_tmean==1,]
+
+predictors[predictors$MAMJ_prcp==1|predictors$MAMJ_ee==1|predictors$MAMJ_sm==1,]
+
+predictors[predictors$sst_pc1==1&predictors$MAMJ_ee==1&predictors$mamj_chl==1,]
+
+
+
+# test<-predictors[rowSums(predictors[,c(1:8)])==1,c(1,5,6,7,9)]
+# predictors<-test[rowSums(test[,c(1:4)])>0,] #Lakes with one sig predictor that is not SST or pre-season chl (7)
+
+
+
+####### Start loop ####################################################################################
+for (i in 1:nrow(predictors)) {
+
+names(lakes.phase)[names(lakes.phase)==predictand[m]] <- "predictand"
+
+#Subset the lake data
+hold<-lakes.phase %>% subset(lagoslakeid==predictors$lagoslakeid[i])
+
+#Select relevant predictors
+pred_index<-predictors[predictors$lagoslakeid==predictors$lagoslakeid[i],]==1
+pred_index<-names(predictors)[pred_index]
+lake_preds <- lakes.phase[lakes.phase$lagoslakeid==predictors$lagoslakeid[i],c("predictand",pred_index,"year","lagoslakeid")]
+
+
+#Get rid of any NA values
+lake_preds<-na.omit(lake_preds)
+
+#Get year and lakeid remove from predictors
+year<-lake_preds$year
+lagoslakeid<-lake_preds$lagoslakeid
+lake_preds<-lake_preds[,-which(names(lake_preds) %in% c("year","lagoslakeid"))]
+
+#If there is more than one predictor (ncol>2), proceed to PCR. If not, create a linear model
+if (ncol(lake_preds)>2) {
+  
+  index = seq(1,nrow(lake_preds)) #set up the index
+  model_drop<-matrix(,nrow=nrow(lake_preds))
+  smry = summary(prcomp(lake_preds[,-1], scale=TRUE,center=TRUE))#Get principal components  w/o predictand
+  pcn = sum(as.numeric(smry$importance[2,]>0.1))
+  
+  pca_preds=data.frame("predictand"=lake_preds[,"predictand"],prcomp(lake_preds[,-1], scale=TRUE,center=TRUE)$x)
+
+for (i in 1:nrow(lake_preds)){#drop one year for cross validation
+  ind<-index!=i #logical value where each column is true except ncol=i
+  train_data<-pca_preds[ind,] #returns every row of basedata except ind=i
+  test_data <- pca_preds[!ind,]
+  #Need to perform PCa
+ # model <- train(
+ # predictand~., data = train_data, method = "pcr", #The predictand in this line needs to be altered manually
+ # scale = TRUE, center=TRUE)
+  model<-pcr(predictand~., data = train_data)
+  prediction <- model %>% predict(test_data, ncomp=pcn)
+  model_drop[i,] = prediction
+}
+  names(lake_preds)[names(lake_preds)=="predictand"] <- predictand[m]
+  RMSE = caret::RMSE(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  Rsquare = caret::R2(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  
+  LAGOS_pcr<-rbind(LAGOS_pcr, data.frame("Predictions"=model_drop,
+                                       "Year"=year,
+                                       "Observed"=lake_preds[,predictand[m]],
+                                       "lagoslakeid"=lagoslakeid,
+                                       "RMSE"=RMSE,
+                                       "Rsquare"=Rsquare,
+                                       "PCR"=TRUE))
+
+}
+
+else{
+  index = seq(1,nrow(lake_preds)) #set up the index
+  model_drop<-matrix(,nrow=nrow(lake_preds))
+  
+  for (i in 1:nrow(lake_preds)){#drop one year for cross validation
+  ind<-index!=i #logical value where each column is true except ncol=i
+  train_data<-lake_preds[ind,] #returns every row of basedata except ind=i
+  test_data <- lake_preds[!ind,]
+  model <- lm(
+  predictand~., data = train_data #The predictand in this line needs to be altered manually
+  )
+  prediction <- model %>% predict(test_data)
+  model_drop[i,] = prediction
+  
+  }
+  
+  names(lake_preds)[names(lake_preds)=="predictand"] <- predictand[m]
+  RMSE = caret::RMSE(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  Rsquare = caret::R2(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  LAGOS_pcr<-rbind(LAGOS_pcr, data.frame("Predictions"=model_drop,
+                                       "Year"=year,
+                                       "Observed"=lake_preds[,predictand[m]],
+                                       "lagoslakeid"=lagoslakeid,
+                                       "RMSE"=RMSE,
+                                       "Rsquare"=Rsquare,
+                                       "PCR"=FALSE))
+  #plot(model_drop,(lake_preds[,predictand[m]]-model_drop),main=lagoslakeid[1]) + abline(h=0,col="red")
+  #plot(model, main=lagoslakeid[1])
+  
+
+  }
+}
+
+LAGOS_pcr<-LAGOS_pcr[-1,]
+
+if (m==3) {
+  LAGOS_pcr[LAGOS_pcr$Predictions<0,"Predictions"] <- 0
+  LAGOS_pcr[LAGOS_pcr$Predictions>1,"Predictions"] <- 1
+}
+
+
+plot(year,model_drop, type="l",ylab="Predictions") + lines(year,lake_preds[,predictand[m]], col="green")
+
+
+
+data.frame(
+  RMSE = caret::RMSE(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T),
+  Rsquare = caret::R2(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T)
+)
+
+Rsquare = caret::R2(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T)
+
+plot(LAGOS_pcr$Observed, LAGOS_pcr$Predictions, col=LAGOS_pcr$lagoslakeid, asp=1, pch=20, xlab="Observations", ylab="Predictions", main="All Predictors") + text(-2,4,round(Rsquare,3))
+
+
+colSums(table(unique(LAGOS_pcr[,c("lagoslakeid","PCR")])))
+
+length(unique(LAGOS_pcr$lagoslakeid))
+
+#Magnitude
+par(mar=c(4,10,4,4))
+barplot((predsplot[order(predsplot)]/nrow(predictors))*100, names.arg=c("Soil Moisture","Air Temperature","Precipitation","SST PC3","SST PC2","Extreme Events","SST PC1","Pre-season log(chlorophyll-a)"), cex.names=0.8,las=1,horiz=T,xlim=c(0,100), xlab="Percent of lakes")
+
+#Duration
+par(mar=c(4,10,4,4))
+barplot((predsplot[order(predsplot)]/nrow(predictors))*100, names.arg=c("Soil Moisture","Precipitation","SST PC3","Air Temperature","Extreme Events","Pre-season log(chlorophyll-a)","SST PC1","SST PC2"), cex.names=0.8,las=1,horiz=T,xlim=c(0,100), xlab="Percent of lakes")
+
+
+#numpreds_dur<-(table(numberpreds)/135)*100
+
+(predsplot[order(predsplot)]/nrow(predictors))*100
+
+numpred_plot<-rbind(data.frame(numpreds_mag,"Metric"="Magnitude"),data.frame(numpreds_dur,"Metric"="Duration"))
+numpred_plot<-rbind(numpred_plot,c("numberpreds"=5,"Freq"=0,"Metric"="Duration"))
+
+ggplot(data=numpred_plot, aes(x=numberpreds,y=as.numeric(Freq), fill=Metric)) + geom_bar(stat="identity", position=position_dodge()) +theme_classic() + ylab("Percent of lakes") + xlab("Number of predictors") + scale_fill_manual(values=c("skyblue","purple3"))
+
+
+
+```
+
+Distribution of Predictions and categorical forecasts
+
+```{r Distribution of Predictions and categorical forecasts}
+set.seed(123)
+
+SkillScores<-data.frame("lagoslakeid"=NA,"RPSS"=NA,"HSS"=NA,"HighSevereCorrect"=NA)
+lakeid <- unique(LAGOS_pcr$lagoslakeid)
+
+category_rpss<-data.frame("rpss"=NA,"cat"=NA)
+
+skill_matrix_totals = 0
+
+#Create Loop to get RPSS and HSS
+for (k in 1:length(lakeid)) {
+
+#Subset lake data
+hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==lakeid[k],]  
+
+Observed<-hold$Observed
+Predictions <- hold$Predictions
+
+err<-Observed-Predictions # difference between measurements and predictions
+verr<-as.vector(err) #error as a vector
+dist<-fitdist(verr,"norm") #fit normal distribution
+muhat<-dist$estimate[1] #estimate of mean difference between obs and predicted
+sigmahat<-dist$estimate[2] #estimate of standard deviation around muhat
+
+rfit<-function(n,r,p1,p2,fit){
+  mR<-matrix(,ncol = n,nrow = r)
+  for (j in seq(1,n)){
+    for (i in seq(1,r)){
+    mR[i,j]<-fit(1,p1,p2) #generate random normally distributed variables
+    }
+  }
+  return(mR)
+}
+
+r=100 #basically bootstrapping to generate a confidence interval for the data
+n=length(Observed)
+Rnorm<-rfit(n,r,muhat,sigmahat,rnorm) # 100 randomly dist numbers
+yhat<-matrix(rep(Predictions, each = r),ncol=n,nrow=r) #model preds repeated for 100 rows 
+yvarn<-yhat+Rnorm #model predictions + the distributed numbers
+yvarn[yvarn<0]<-0
+
+
+
+#############################Calculate RPSS###########################################
+
+if (m==1) {
+
+#Observed
+lower<-quantile(Observed, prob=.33) #lower third of obs predictand values
+upper<-quantile(Observed, prob=.67)
+severe<-quantile(Observed, prob=0.95)
+
+#Angradi et al thresholds
+#lower<-log(lakeinfo[hold$lagoslakeid==lakeinfo$lagoslakeid,"Rec_high_low"])
+#upper<-log(lakeinfo[hold$lagoslakeid==lakeinfo$lagoslakeid,"Rec_low_marg"])
+
+  Obs<-matrix(0, nrow=n, ncol=4)
+  for (i in seq(1,n)){
+    if (Observed[i]<=lower){ #how many obs predictand values were in lower third of obs predictand values
+      Obs[i,1]<-1
+    }
+    else if (lower<=Observed[i]&&Observed[i]<=upper){ #middle third
+      Obs[i,2]<-1
+    }
+    else if (upper<=Observed[i]&&Observed[i]<=severe){
+      Obs[i,3]<-1 #upper third
+    }
+    else {
+      Obs[i,4] <- 1 #Severe events
+    }
+  }
+
+  #Predicted %
+  percent<-matrix(0,ncol = 4, nrow = n)
+  for (i in seq(1,n)){
+    yvarn_i<-yvarn[,i]
+    for (j in seq(1:100)){
+      if (yvarn_i[j]<=lower){ #how many predictions were in lower third of obs predictand values
+       percent[i,1]<-percent[i,1]+1
+      }
+      else if (yvarn_i[j]>lower && yvarn_i[j]<upper){ #middle third of obs predictand values
+        percent[i,2]<-percent[i,2]+1
+      }
+      else if (yvarn_i[j]>upper && yvarn_i[j]<severe){
+        percent[i,3]<-percent[i,3]+1 #upper third of obs predictand values
+      }
+      else {
+        percent[i,4]<-percent[i,4]+1 #Severe Events
+      }
+    }
+  }
+
+  ncat<-4
+  numB<-length(Obs[,1][Obs==1]) 
+  numN<-length(Obs[,2]) 
+  numA<-length(Obs[,3]) 
+  numS<-length(Obs[,4]) 
+  
+  perB<-(numB/n)
+  perN<-(numN/n)
+  perA<-(numA/n)
+  perS<-(numS/n)
+  
+  dpercent<-percent/100 #forecasted
+
+  calc_rps <- function(predicted, observed){
+    rps <- 0
+    for (i in 1:(length(predicted)-1)) {
+      sum_pred <- sum(predicted[1:i])
+      sum_obs <- sum(observed[1:i])
+      sq_err <- as.numeric((sum_pred-sum_obs)^2)
+      rps <- rps + sq_err
+    }
+    return(rps)
+  }
+  
+  rps<-rep(0,n) #initial vector for model RPS values for each year
+  rps_clim<-rep(0,n) #Same for climatology
+
+  for (i in 1:n){
+    pred_vector<-as.vector(dpercent[i,])
+    obs_vector<-as.vector(Obs[i,])
+    
+    #calculate RPS for one year
+    rps_temp<-calc_rps(pred_vector,obs_vector)
+    
+    #claculate rps for climatology
+    rps_clim_temp<-calc_rps(predicted = c(0.33,0.33,0.28,0.05),obs_vector)
+    
+    #store RPS values
+    rps[i]<-rps_temp
+    rps_clim[i]<-rps_clim_temp
+  }
+}
+
+if (m==3) { #Two categories
+  #Observed
+  lower<-mean(Observed)
+
+  Obs<-matrix(0, nrow=n, ncol=2)
+  for (i in seq(1,n)){
+    if (Observed[i]<=lower){ 
+      Obs[i,1]<-1
+    }
+    else {
+      Obs[i,2] <- 1
+    }
+  }
+
+  #Predicted %
+  percent<-matrix(0,ncol = 2, nrow = n)
+  for (i in seq(1,n)){
+    yvarn_i<-yvarn[,i]
+    for (j in seq(1:100)){
+      if (yvarn_i[j]<=lower){ 
+       percent[i,1]<-percent[i,1]+1
+      }
+      else {
+        percent[i,2]<-percent[i,2]+1
+      }
+    }
+  }
+
+  ncat<-2
+  numB<-length(Obs[,1][Obs==1]) 
+  numN<-length(Obs[,2]) 
+  
+  perB<-(numB/n)
+  perN<-(numN/n)
+  
+  dpercent<-percent/100 #forecasted
+
+  calc_rps <- function(predicted, observed){
+    rps <- 0
+    for (i in 1:(length(predicted)-1)) {
+      sum_pred <- sum(predicted[1:i])
+      sum_obs <- sum(observed[1:i])
+      sq_err <- as.numeric((sum_pred-sum_obs)^2)
+      rps <- rps + sq_err
+    }
+    return(rps)
+  }
+  
+  rps<-rep(0,n) #initial vector for model RPS values for each year
+  rps_clim<-rep(0,n) #Same for climatology
+
+  for (i in 1:n){
+    pred_vector<-as.vector(dpercent[i,])
+    obs_vector<-as.vector(Obs[i,])
+    #calculate RPS for one year
+    rps_temp<-calc_rps(pred_vector,obs_vector)
+    #claculate rps for climatology
+    rps_clim_temp<-calc_rps(predicted = c(0.5,0.5),obs_vector)
+    #store RPS values
+    rps[i]<-rps_temp
+    rps_clim[i]<-rps_clim_temp
+  }
+}
+
+
+rps<-rps/(ncat-1)
+rps_clim<-rps_clim/(ncat-1)
+rpss<-1-rps/rps_clim
+
+if (m==1) {
+belowrpss=data.frame("rpss"=rpss[Obs[,1]==1],"cat"="below") #Below years rpss 
+nearrpss=data.frame("rpss"=rpss[Obs[,2]==1],"cat"="near") #Near years rpss
+aboverpss=data.frame("rpss"=rpss[Obs[,3]==1],"cat"="above") #Above years rpss
+severerpss=data.frame("rpss"=rpss[Obs[,4]==1],"cat"="severe") #Severe rpss
+
+category_rpss<-rbind(category_rpss,belowrpss,nearrpss,aboverpss,severerpss)
+} else{
+belowrpss=data.frame("rpss"=rpss[Obs[,1]==1],"cat"="below") #Below years rpss 
+aboverpss=data.frame("rpss"=rpss[Obs[,2]==1],"cat"="above") #Above years rpss
+category_rpss<-rbind(category_rpss,belowrpss,aboverpss)
+}
+
+
+rpss<-median(rpss)
+
+#################################### Skill matrix and HSS ###################################
+if (m==1) {
+  ##For calculating HSS
+  percent_hold<-c(0,0,0)
+  pred_m<-matrix(0,ncol = 4,nrow = n)
+  for (i in seq(1:n)){
+    percent_hold<-percent[i,]
+    if (percent_hold[1]==max(percent_hold)){
+      pred_m[i,1]<-1
+    }
+    else if (percent_hold[2]==max(percent_hold)){
+      pred_m[i,2]<-1
+    }
+    else if (percent_hold[3]==max(percent_hold)){
+      pred_m[i,3]<-1
+    }
+    else {
+      pred_m[i,4]<-1
+    }
+  }
+  
+  pred_test<-c()
+  for (i in 1:n){
+    percent_hold<-percent[i,] #Take first row from BNA repeated predictions matrix
+      if (percent_hold[1]==max(percent_hold)){ #if B is the largest category feed pred_test the lower boundary-1 (presumably to tell it which bin it should be in) Why do it like this??
+      pred_test[i]<-lower-0.1
+    }
+    else if (percent_hold[2]==max(percent_hold)){
+      pred_test[i]<-lower+((upper-lower)/2) #Make sure it gets assigned to the normal category
+    }
+    else if (percent_hold[3]==max(percent_hold)){
+      pred_test[i]<-upper+((severe-upper)/2)
+    }
+    else{
+      pred_test[i] <- severe+0.1
+    }
+  }
+  
+  observed_df<-data.frame(year = year[1:n],obs = Observed[1:n])
+  predicted_df<-data.frame(year = year[1:n], pred = pred_test)
+  breaks<-c(0,lower,upper,severe, Inf)
+  labels<-c("Low","Normal","High","Severe")
+  bin_obs<-cut(observed_df$obs,breaks,include.lowest = T,right = F, labels=labels)
+  bins_pred <- cut(predicted_df$pred, breaks, include.lowest = T, right=FALSE, labels=labels)
+  
+  #create contingency table
+  observed_df$obs_bins<-bin_obs
+  observed_df$pred_bins<-bins_pred
+  skill_matrix<-with(observed_df, table(obs_bins, pred_bins))
+  
+  skill_matrix_totals = skill_matrix_totals+skill_matrix
+  
+  #Calculate HSS
+  skill_matrix_flip<-with(observed_df, table(pred_bins, obs_bins))
+  HSS<-multi.cont(skill_matrix_flip, baseline = c(0.33,0.33,0.28,0.05))
+  #HighSevereCorrect<-sum(as.numeric(HSS$h[c(3,4)]))
+  HighSevereCorrect<-sum(skill_matrix_flip[c(3,4),c(3,4)])/sum(skill_matrix_flip[,c(3,4)])
+  
+}
+
+if (m==3) {
+  percent_hold<-c(0,0,0)
+  pred_m<-matrix(0,ncol = 2,nrow = n)
+  for (i in seq(1:n)){
+    percent_hold<-percent[i,]
+    if (percent_hold[1]==max(percent_hold)){
+      pred_m[i,1]<-1
+    }
+    else {
+      pred_m[i,2]<-1
+    }
+  }
+  
+  pred_test<-c()
+  for (i in 1:n){
+    percent_hold<-percent[i,] 
+      if (percent_hold[1]==max(percent_hold)){ 
+      pred_test[i]<-lower-0.1
+    }
+    else{
+      pred_test[i] <- lower+0.1
+    }
+  }
+  
+  observed_df<-data.frame(year = year[1:n],obs = Observed[1:n])
+  predicted_df<-data.frame(year = year[1:n], pred = pred_test)
+  breaks<-c(0,lower,1)
+  labels<-c("Low","High")
+  bin_obs<-cut(observed_df$obs,breaks,include.lowest = T,right = F, labels=labels)
+  bins_pred <- cut(predicted_df$pred, breaks, include.lowest = T, right=FALSE, labels=labels)
+  
+  #create contingency table
+  observed_df$obs_bins<-bin_obs
+  observed_df$pred_bins<-bins_pred
+  skill_matrix<-with(observed_df, table(obs_bins, pred_bins))
+  
+  skill_matrix_totals = skill_matrix_totals+skill_matrix
+  
+  #Calculate HSS
+  skill_matrix_flip<-with(observed_df, table(pred_bins, obs_bins))
+  HSS<-multi.cont(skill_matrix_flip, baseline = c(0.5,0.5))
+  HighSevereCorrect<-as.numeric(HSS$h[2])
+  }
+
+
+#Bind RPSS and HSS to the dataframe
+SkillScores <- rbind(SkillScores,c(lakeid[k],rpss,HSS$hss,HighSevereCorrect))
+}
+
+SkillScores
+
+lakevars<-read.csv("/Users/maxbeal/Desktop/PhD/LAGOS_Forecasts/Wilkinsonetal/BloomIntensification_github/lakecovars_20200810.csv")
+
+mean(SkillScores$HSS,na.rm=T)
+
+df_skillmatrix<-data.frame(skill_matrix_totals)
+
+HSS
+
+skill_matrix_totals
+
+
+ggplot(df_skillmatrix, aes(fill=forcats::fct_rev(pred_bins), y=Freq, x=obs_bins)) + 
+    geom_bar(position="fill", stat="identity") + theme_classic() + xlab("Observed Category") + ylab("Proportion") + labs(fill="Predicted Category") + 
+  scale_fill_manual("Predicted Category", breaks=c("Low","Normal","High","Severe"),labels=c("Below","Near","Above","Severe"),values=c("gray80","gray50","gray20","gray5")) + scale_x_discrete(breaks=c("Low","Normal","High","Severe"),labels=c("Below","Near","Above","Severe")) 
+
+
+ 
+library(dygraphs)
+
+observed_df$maxpred<-apply(yvarn,2,max)
+observed_df$minpred<-apply(yvarn,2,min)
+
+observed_df$maxpred[0:13] <- observed_df$obs[0:13]
+observed_df$minpred[0:13] <- observed_df$obs[0:13]
+observed_df$lower <- rep(lower,nrow(observed_df))
+observed_df$upper <- rep(upper,nrow(observed_df))
+observed_df$severe <- rep(severe,nrow(observed_df))
+
+
+observed_df[,-c(3,4,9)] %>% dygraph(ylab = "log(chlorophyll-a)") %>%
+  dySeries("obs", color = "black") %>%
+  dySeries(c("minpred", "obs", "maxpred"), color="green", strokeWidth = 2) %>%
+  dySeries(c("lower"), color="black", strokePattern = "dotted", strokeWidth = 2)%>%
+  dySeries(c("upper"), color="black", strokePattern = "dotted", strokeWidth = 2)
+  
+
+
+
+mean(category_rpss$rpss,na.rm=T)
+
+median(category_rpss[category_rpss$cat=="below",1],na.rm=T)
+median(category_rpss[category_rpss$cat=="near",1],na.rm=T)
+median(category_rpss[category_rpss$cat=="above",1],na.rm=T)
+median(category_rpss[category_rpss$cat=="severe",1],na.rm=T)
+
+df_skillmatrix[order(df_skillmatrix$obs_bins),]
+
+mean(SkillScores$RPSS,na.rm=T)
+mean(SkillScores$HSS,na.rm=T)
+
+```
+
+
+Look at a map of skill scores
+
+```{r Skill Scores}
+
+score_hold<-LAGOS_pcr %>%
+  group_by(lagoslakeid) %>%
+  summarise(Rsquare = mean(Rsquare,na.rm=TRUE),
+            RMSE = mean(RMSE,na.rm=TRUE))
+
+SkillScores<-merge(SkillScores,score_hold,by="lagoslakeid")
+
+
+lake.geom<-unique(lakes.phase[,c("lagoslakeid","mean_long","mean_lat")])
+lake.geom<-lake.geom[lake.geom$lagoslakeid %in% lakeid,]
+lake.geom<-lake.geom[order(lake.geom$lagoslakeid),]
+
+#SkillScores<-SkillScores[-1,]
+SkillScores<-SkillScores[order(SkillScores$lagoslakeid),]
+
+
+SkillScores$lakeid <- lake.geom$lagoslakeid
+SkillScores$long <- lake.geom$mean_long
+SkillScores$lat <- lake.geom$mean_lat
+
+
+SkillScores.sf <- st_as_sf(SkillScores, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = SkillScores.sf, aes(color=RPSS)) + 
+  theme_bw() +  scale_color_viridis_c()
+
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = SkillScores.sf, aes(color=HSS>0)) + 
+  theme_bw()
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = SkillScores.sf, aes(color=RPSS>0)) + 
+  theme_bw() 
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data=states2, alpha=0.2) +
+  geom_sf(data = SkillScores.sf, aes(pch=HighSevereCorrect>0.5)) + 
+  scale_shape_manual(values=c(21,20)) +
+  theme_bw()+labs(shape="")
+
+
+hist(SkillScores$RPSS,xlim=c(-1,1))
+hist(SkillScores$Rsquare,xlim=c(0,1))
+hist(SkillScores$HSS)
+
+sum(as.numeric(SkillScores$RPSS>0))/nrow(SkillScores)
+sum(as.numeric(SkillScores$HSS>0))/nrow(SkillScores)
+sum(as.numeric(SkillScores$HighSevereCorrect>=0.5))/nrow(SkillScores)
+
+#Look at timeseries figures of all predictions
+# for (i in 1:length(unique(LAGOS_pcr$lagoslakeid))) {
+#   hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==lakeid[i],] 
+#   n = nrow(hold)
+#   lower<-quantile(hold$Observed, prob=.33) 
+#   upper<-quantile(hold$Observed, prob=.67)
+#   severe <- quantile(hold$Observed, prob=0.95)
+#   #lower<-log(lakeinfo[hold$lagoslakeid==lakeinfo$lagoslakeid,"Rec_high_low"])
+#   #upper<-log(lakeinfo[hold$lagoslakeid==lakeinfo$lagoslakeid,"Rec_low_marg"])
+#   plot(hold$Year,hold$Observed, type="b", xlab="",ylab="Log(Chlorophyll-a) (mg/L)") + lines(hold$Year,hold$Predictions, col="green",type="b") + lines(hold$Year,rep(lower,n), col="dark gray", lty=2) + lines(hold$Year,rep(upper,n), col="dark gray", lty=2) + lines(hold$Year,rep(severe,n), col="dark gray", lty=2) + title(lakeid[i])
+# }
+
+
+
+test<-merge(SkillScores,lakevars,by="lagoslakeid")
+test<-merge(test,unique(chl.df[,c("lagoslakeid","cluster")]),by="lagoslakeid")
+
+
+ggplot(test, aes(x=as.factor(cluster), y=RPSS)) + 
+  geom_violin() + geom_boxplot(width=0.1)
+
+ggplot(test[test$cluster=="NE",], aes(x=as.factor(tsi.cat), y=HighSevereCorrect)) + 
+  geom_violin() + geom_boxplot(width=0.1)
+
+ggplot(test, aes(x=as.factor(cluster), y=HSS)) + 
+  geom_violin() + geom_boxplot(width=0.1)
+
+mean(test[test$cluster=="NE","RPSS"])
+mean(test[test$cluster=="MW","RPSS"])
+
+test$area_cat<-cut(test$lake_area_ha, c(1,50,150,Inf))
+
+test$Area_depth_ratio<-test$lake_area_ha/test$maxdepth
+test$area_depth_cat<-cut(test$Area_depth_ratio, c(1,3,25,Inf))
+test$agri_cat<-cut(test$agri_pct, c(0,2,15,100))
+
+quantile(na.omit(test$agri_pct),0.67)
+
+test<-test[test$tsi.cat!="hypereutrophic",]
+
+ggplot(test, aes(x=as.factor(agri_cat), y=HighSevereCorrect)) + geom_boxplot(width=0.15) + theme_classic() + xlab("") + ylab("High/Severe Correct")
+
+c<-ggplot(test, aes(x=as.factor(area_cat), y=HighSevereCorrect)) + 
+  geom_violin() + geom_boxplot(width=0.15) + theme_classic() + xlab("") + ylab("High Correct")
+
+d<-ggplot(test, aes(x=as.factor(tsi.cat), y=HighSevereCorrect)) + 
+  geom_violin() + geom_boxplot(width=0.15) + theme_classic() + xlab("") + ylab("") 
+
+#ggarrange(c,d,a,b,ncol=2,nrow=2)
+
+test2<-merge(predictors,lakevars,by="lagoslakeid")
+test2<-test2[test2$tsi.cat!="hypereutrophic",]
+test2$area_cat<-cut(test2$lake_area_ha, c(1,50,100,Inf))
+
+test2$agcat<-cut(test2$agri_pct, c(-1,25,100))
+test2$devcat<-cut(test2$devel_pct, c(-1,25,100))
+
+
+prop.table(table(test2$mamj_chl,test2$agcat),margin=2)
+prop.table(table(test2$sst_pc1,test2$agcat),margin=2)
+prop.table(table(test2$MAMJ_ee,test2$agcat),margin=2)
+prop.table(table(test2$MAMJ_prcp,test2$agcat),margin=2)
+prop.table(table(test2$MAMJ_sm,test2$agcat),margin=2)
+
+
+
+barplot(prop.table(table(test2$mamj_chl,test2$agcat),margin=2))
+barplot(prop.table(table(test2$sst_pc1,test2$agcat),margin=2))
+
+names(lake.cors)[17] <- "lagoslakeid"
+
+test3<-merge(lake.cors,lakevars,by="lagoslakeid")
+prop.table(table(test3$varsig,test3$tsi.cat),margin=2)
+barplot(prop.table(table(test3$varsig,test3$tsi.cat),margin=2))
+
+test4<-merge(lake.cors,SkillScores,by="lagoslakeid")
+ggplot(test4, aes(x=as.factor(varsig), y=HighSevereCorrect)) + geom_boxplot(width=0.1)
+
+test4 %>% group_by(varsig) %>% summarise(mean(HighSevereCorrect),mean(RPSS),mean(HSS),mean(Rsquare),mean(RMSE))
+
+table(predictors$MAMJ_prcp,predictors$mamj_chl)
+table(predictors$MAMJ_prcp,predictors$sst_pc1)
+
+
+test2$hydro<-as.numeric(test2$MAMJ_prcp==1|test2$MAMJ_ee==1|test2$MAMJ_sm==1)
+
+barplot(prop.table(table(test2$hydro,test2$agcat),margin=2))
+barplot(prop.table(table(test2$mamj_chl,test2$agcat),margin=2))
+
+
+table(test2$tsi.cat,test2$agcat)
+prop.table(table(test2$hydro,test2$agcat),margin=2)
+
+table(test2$hydro,test2$devcat)
+prop.table(table(test2$hydro,test2$devcat),margin=2)
+
+
+
+#Lakes with both duration and magnitude models
+#Durscores <- SkillScores
+# both<-merge(Durscores,SkillScores,by="lagoslakeid", all.x=TRUE,all.y=TRUE)
+# plot(both$Rsquare.x,both$Rsquare.y)
+# table(both$HSS.x>0,both$HSS.y>0)
+# table(both$RPSS.x>0,both$RPSS.y>0)
+# both<-as.data.frame(both)
+# Durscores[Durscores$lagoslakeid %in% SkillScores$lagoslakeid,"lagoslakeid"]
+# both$bothmodels<-both$lagoslakeid %in% as.data.frame(Durscores[Durscores$lagoslakeid %in% SkillScores$lagoslakeid,"lagoslakeid"])[,1]
+# ggplot(both, aes(x=as.factor(bothmodels), y=RPSS.y)) +
+#   geom_violin() + geom_boxplot(width=0.1)
+# 
+# both %>% group_by(bothmodels) %>% summarise(mean(HighSevereCorrect.y,na.rm=T),mean(RPSS.y,na.rm=T),mean(HSS.y,na.rm=T),mean(Rsquare.y,na.rm=T),mean(RMSE.y,na.rm=T))
+# 
+# both_lakevars<-merge(both,lakevars,by="lagoslakeid")
+# both_lakevars<-both_lakevars[both_lakevars$tsi.cat!="hypereutrophic",]
+
+# tsiplotdata<-both_lakevars %>% group_by(bothmodels,tsi.cat) %>% summarise(mean(HighSevereCorrect.y,na.rm=T),mean(RPSS.y,na.rm=T),mean(HSS.y,na.rm=T),mean(Rsquare.y,na.rm=T),mean(RMSE.y,na.rm=T))
+
+# ggplot(tsiplotdata, aes(x=as.factor(tsi.cat), y=tsiplotdata$`mean(RMSE.y, na.rm = T)`, colour=bothmodels)) + geom_point()
+# 
+# ggplot(both_lakevars, aes(x=as.factor(tsi.cat), y=HighSevereCorrect.x, color=bothmodels)) +
+#   geom_violin()
+
+
+
+prop.table(table(test$tsi.cat, test$HighSevereCorrect>0.5),margin=2)
+prop.table(table(test$tsi.cat, test$Rsquare>mean(test$Rsquare)),margin=2)
+prop.table(table(test$Rsquare>mean(test$Rsquare),test$tsi.cat), margin=2)
+
+table(test$Rsquare>mean(test$Rsquare),test$tsi.cat)
+
+nrow(test[test$Area_depth_ratio<8,])
+nrow(test[test$Area_depth_ratio>8,])
+
+plot(log(test$Area_depth_ratio),test$HighSevereCorrect)
+plot(log(test$maxdepth),test$HighSevereCorrect)
+
+quantile(test$Area_depth_ratio,0.5,na.rm=T)
+
+#magskill.sf<-SkillScores.sf
+#durskill.sf<-SkillScores.sf
+
+skilljoin.sf<-st_join(magskill.sf,durskill.sf,suffix = c(".mag", ".dur"),join=st_intersects,left=F)
+
+colors = c("blue","red","green")
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data=states2, alpha=0.2) +
+  geom_sf(data= magskill.sf, color="blue", aes(shape=RPSS>0& HSS>0)) +
+  geom_sf(data = durskill.sf, color="green", aes(shape=RPSS>0 & HSS>0)) + 
+  geom_sf(data = skilljoin.sf, color="purple", aes(shape=RPSS.mag>0& HSS.mag>0&RPSS.dur>0& HSS.dur>0)) + 
+  scale_shape_manual(values=c(4,20)) + theme_bw() + scale_size_manual(values=c(1.2,1.2))
+
+summary(SkillScores$RPSS,na.rm=T)
+
+durskill_cluster<-st_join(durskill.sf, states.sub,st_within)
+magskill_cluster<-st_join(magskill.sf, states.sub,st_within)
+
+
+fig1<-durskill_cluster %>% 
+  group_by(cluster) %>% 
+  summarise(RPSS_m = mean(RPSS,na.rm=T),
+            RPSS_se = se(RPSS),
+            HSS_m = mean(HSS,na.rm=T),
+            HSS_se = se(HSS),
+            R2_m = mean(Rsquare,na.rm=T),
+            R2_se = se(Rsquare),
+            RMSE_m = mean(RMSE,na.rm=T),
+            RMSE_se = se(RMSE),
+            Metric = "Duration")
+
+
+fig2<-magskill_cluster %>% 
+  group_by(cluster) %>% 
+  summarise(RPSS_m = mean(RPSS,na.rm=T),
+            RPSS_se = se(RPSS),
+            HSS_m = mean(HSS,na.rm=T),
+            HSS_se = se(HSS),
+            R2_m = mean(Rsquare,na.rm=T),
+            R2_se = se(Rsquare),
+            RMSE_m = mean(RMSE,na.rm=T),
+            RMSE_se = se(RMSE),
+            Metric = "Magnitude")
+
+fig_comb<-rbind(fig1,fig2)
+
+a<-ggplot(fig_comb, aes(x = Metric,y = RPSS)) + 
+geom_bar(aes(fill = cluster), position = "dodge", stat="identity") + xlab("")+ theme_classic()+ theme(legend.title=element_blank())+ scale_fill_manual(values = c("light blue","goldenrod"))+ theme(legend.position = "none")
+
+b<-ggplot(fig_comb, aes(x = Metric,y = HSS)) + 
+geom_bar(aes(fill = cluster), position = "dodge", stat="identity") + xlab("")+ theme_classic()+ theme(legend.title=element_blank())+ scale_fill_manual(values = c("light blue","goldenrod"))+ theme(legend.position = "none")
+
+c<-ggplot(fig_comb, aes(x = Metric,y = R2)) + 
+geom_bar(aes(fill = cluster), position = "dodge", stat="identity")  + xlab("")+theme_classic() + theme(legend.position = "none")+ scale_fill_manual(values = c("light blue","goldenrod"))
+
+d<-ggplot(fig_comb, aes(x = Metric,y = RMSE_m)) + 
+geom_bar(aes(fill = cluster), position = position_dodge(), stat="identity") + xlab("")+ theme_classic()+ theme(legend.position = "none")+ scale_fill_manual(values = c("light blue","goldenrod"))+
+  geom_errorbar(aes(ymin=RMSE_m-RMSE_se, ymax=RMSE_m+RMSE_se), width=.2,
+                 position=position_dodge(.9))
+
+ggarrange(a,b,c,d, common.legend = T,legend = "right")
+
+
+
+sum(as.numeric(magskill_cluster$HighSevereCorrect>0.5))/nrow(magskill_cluster)
+sum(as.numeric(magskill_cluster$HSS>0))/nrow(magskill_cluster)
+
+sum(as.numeric(durskill_cluster$HighSevereCorrect>0.5))/nrow(durskill_cluster)
+sum(as.numeric(durskill_cluster$HSS>0))/nrow(durskill_cluster)
+
+
+
+```
+
+
+For getting a specific forecast
+
+```{r}
+#Subset lake data
+#hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==lakeid[k],]  
+hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==6552,] #open circle, Duanespurg Reservoir
+#hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==25980,] #open circle, Neversink Reservoir
+#hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==6433,] #closed circle, Mariaville Lake
+#hold <- LAGOS_pcr
+
+
+states.sub<-filter(states, ID %in% c("new york"))
+cluster.sf<- st_as_sf(chl.df, coords = c("mean_long", "mean_lat"), crs = 4326)
+
+unique(sub.sf$ID.x)
+
+sub.sf<-st_join(cluster.sf,states.sub, join = st_within)
+
+
+ggplot() + 
+  geom_sf(data = states.sub) +
+  geom_sf(data = sub.sf[sub.sf$ID.x=="new york",], aes(color=lagoslakeid==6552|lagoslakeid==6433), size=0.8) + 
+  scale_color_manual(values=c("black","red")) +
+  theme_bw()+labs(color="")
+
+
+
+Observed<-hold$Observed
+Predictions <- hold$Predictions
+
+err<-Observed-Predictions # difference between measurements and predictions
+verr<-as.vector(err) #error as a vector
+
+dist<-fitdist(verr,"norm") # Fitting a normal distribution to the differences b/w the predicted values and the observed values to get values for the boxplot
+
+muhat<-dist$estimate[1] #estimate of mean difference between obs and predicted
+sigmahat<-dist$estimate[2] #estimate of standard deviation around muhat
+
+rfit<-function(n,r,p1,p2,fit){
+  mR<-matrix(,ncol = n,nrow = r)
+  for (j in seq(1,n)){
+    for (i in seq(1,r)){
+    mR[i,j]<-fit(1,p1,p2) #generate random normally distributed variables
+    }
+  }
+  return(mR)
+}
+r=100 #basically bootstrapping to generate a confidence interval for the data
+n=length(Observed)
+Rnorm<-rfit(n,r,muhat,sigmahat,rnorm) # 100 randomly dist numbers generated around the difference between obs and predicted 
+yhat<-matrix(rep(Predictions, each = r),ncol=n,nrow=r) # model predictions repeated for 100 rows 
+yvarn<-yhat+Rnorm #model predictions + the distributed numbers
+yvarn[yvarn<0]<-0
+
+
+
+#hold6552 <- hold
+```
+
+
+
+```{r}
+
+#Code for creating a boxplot of forecasts
+h1<-boxplot(yvarn,outline = FALSE,xlab = 'Years', ylab = 'JASO Average Chl-a (ug/L)',ylim=c(min(yvarn),max(yvarn)), main="",lty=1)
+lower<-quantile(Observed, prob=.33) #lower third of obs cyano values
+upper<-quantile(Observed, prob=.67)
+severe<-quantile(Observed,prob=0.95)
+B=rep(lower,n) #33% quantile need to change this so it's not hard coded
+N=rep(upper,n) #67% quantile
+S=rep(severe,n) #67% quantile
+lines(seq(1,n),Observed,col="blue", lwd=2)
+lines(seq(1,n),B,col="black",lty=2)
+lines(seq(1,n),N,col="black",lty=2)
+lines(seq(1,n),S,col="black",lty=2)
+
+predictors[predictors$lagoslakeid==6433,]
+predictors[predictors$lagoslakeid==25980,]
+
+test[test$lagoslakeid==6433,]
+test[test$lagoslakeid==6552,]
+
+
+
+#Obs6552
+Observed
+
+
+#plot(hold[hold$Year %in% hold6552$Year,"Year"],hold[hold$Year %in% hold6552$Year,"Predictions"],type="b",col="red") + lines(hold[hold$Year %in% hold6552$Year,"Year"],hold6552[hold6552$Year %in% hold$Year,"Predictions"],type="b",col="blue")
+
+#hold[hold$Year %in% hold6552$Year,]
+#hold6552[hold6552$Year %in% hold$Year,]
+
+#Data for percent barplot
+plotdata<-rbind(colMeans((yvarn<B)*1),
+           colMeans((yvarn>=B&yvarn<=N)*1),
+           colMeans((yvarn>=N&yvarn<=S)*1),
+           colMeans((yvarn>S)*1))
+
+#Get y coord for observed points in the barplot
+
+for (i in 1:nrow(hold)) {
+  if (hold$Observed[i]<B) {
+    hold$Category[i] <- "Below"
+  }
+  else if (hold$Observed[i]>=B&hold$Observed[i]<=N) {
+    hold$Category[i] <- "Near"
+  }
+  else if (hold$Observed[i]>=N&hold$Observed[i]<=S) {
+    hold$Category[i] <- "Above"
+  }
+  else {
+    hold$Category[i] <- "Severe"
+  }
+}
+
+i=1
+for (i in 1:nrow(hold)) {
+  if (hold$Category[i]=="Below") {
+    hold$barploty[i]=plotdata[1,i]/2
+  }
+  else if (hold$Category[i]=="Near") {
+    hold$barploty[i]= plotdata[2,i]/2 + sum(plotdata[c(1),i])
+  }
+  else if (hold$Category[i]=="Above") {
+    hold$barploty[i]= plotdata[3,i]/2 + sum(plotdata[c(1,2),i])
+  }
+  else {
+    hold$barploty[i]= plotdata[4,i]/2 + sum(plotdata[c(1,2,3),i])
+  }
+}
+
+
+
+
+bar<-barplot(plotdata, names.arg=hold$Year, main="Duanespurg Reservoir",col=(c("gray75","gray60","gray30","gray20")),cex.names=0.61)
+opar =par(oma = c(0,0,0,0), mar = c(0,0,0,0), new = TRUE,xpd=T)
+legend(x = "bottom", legend = c("Below Normal","Near Normal","Above Normal","Severe"), fill = c("gray75","gray60","gray30","gray20"), bty = "n", ncol = 4, inset= -0.25)
+points(x = bar, y = hold$barploty, col="white",pch=8,lwd=1.5)
+par(opar) # reset par
+
+
+bar<-barplot(plotdata, names.arg=hold$Year, main="Duanespurg Reservoir",col=(c(brewer.pal(4, "BuGn"))),cex.names=0.61)
+opar =par(oma = c(0,0,0,0), mar = c(0,0,0,0), new = TRUE,xpd=T)
+legend(x = "bottom", legend = c("Below Normal","Near Normal","Above Normal","Severe"), fill = c(brewer.pal(4, "BuGn")), bty = "n", ncol = 4, inset= -0.25)
+points(x = bar, y = hold$barploty, col="gray20", pch = 23, bg = "white",lwd=1.5)
+par(opar) # reset par
+
+SkillScores[SkillScores$lagoslakeid==6433,] #mariaville, 1999 77% above or severe
+SkillScores[SkillScores$lagoslakeid==6552,] #duanespurg, 1999 85% above or severe
+
+
+plotdata
+
+
+```
+
+
+START CHUNKS FOR FORECASTS BUILT ONLY WITH SST REGIONS AND PRE-SEASON CHLOROPHYLL
+
+Correlations (SST and Chl only)
+
+
+```{r Correlations (SST and MAMJ chl only)}
+predictand <- c("mean_chl","chl95","dur")
+m = 3 #1 = mean chl, 2 = chl95, 3 = duration
+
+#lakes.phase<-merge(lakes.phase,fai, by=c("year","lagoslakeid"))
+
+#lakes.phase<-nao.df[nao.df$phase=="1"|nao.df$phase=="2",]
+#lakes.phase<-nao.df[nao.df$phase=="3"|nao.df$phase=="4",]
+lakes.phase<-nao.df
+
+#lakes.phase<-nao.df[nao.df$TSI=="1"|nao.df$TSI=="2",]
+#lakes.phase<-nao.df[nao.df$TSI=="3"|nao.df$TSI=="4",]
+#lakes.phase<-nao.df
+
+#lakes.phase<-na.omit(lakes.phase)
+lake.id<-unique(lakes.phase$lagoslakeid)
+
+
+
+lake.cors<-data.frame("pc1.pvalue"=NA,"pc1.cor"=NA,
+                      "pc2.pvalue"=NA,"pc2.cor"=NA,
+                      "pc3.pvalue"=NA,"pc3.cor"=NA,
+                      "mamj_chl.pvalue"=NA,"mamj_chl.cor"=NA)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.phase %>% subset(lagoslakeid==lake.id[i])
+  if (nrow(hold)>5) {
+    
+pc1.cor<-corr.test(hold[,predictand[m]],hold$sst_pc1, use="pairwise",adjust="none",ci=FALSE)
+pc2.cor<-corr.test(hold[,predictand[m]],hold$sst_pc2, use="pairwise",adjust="none",ci=FALSE)
+pc3.cor<-corr.test(hold[,predictand[m]],hold$sst_pc3, use="pairwise",adjust="none",ci=FALSE)
+mamj_chl.cor <- corr.test(hold[,predictand[m]],hold$mamj_chl, use="pairwise",adjust="none",ci=FALSE)
+string<-data.frame("pc1.pvalue"=pc1.cor$p,
+                   "pc1.cor"=pc1.cor$r,
+                   "pc2.pvalue"=pc2.cor$p,
+                   "pc2.cor"=pc2.cor$r,
+                   "pc3.pvalue"=pc3.cor$p,
+                   "pc3.cor"=pc3.cor$r,
+                   "mamj_chl.pvalue" = mamj_chl.cor$p,
+                   "mamj_chl.cor"=mamj_chl.cor$r)
+lake.cors<-rbind(lake.cors,string)
+  }
+else
+  lakes.phase<-lakes.phase %>% subset(lagoslakeid!=lake.id[i])
+  next
+}
+
+
+
+lake.geom<-unique(lakes.phase[,c("lagoslakeid","mean_long","mean_lat")])
+lake.cors<-lake.cors[-1,]
+lake.cors$lakeid <- lake.geom$lagoslakeid
+lake.cors$long <- lake.geom$mean_long
+lake.cors$lat <- lake.geom$mean_lat
+
+lake.cors$sig<-lake.cors$pc1.pvalue<=0.05|lake.cors$pc2.pvalue<0.05|lake.cors$pc3.pvalue<0.05|lake.cors$mamj_chl.pvalue<=0.05
+
+
+lake.cors$sstsig<-as.numeric(lake.cors$pc1.pvalue<=0.05|lake.cors$pc2.pvalue<0.05|lake.cors$pc3.pvalue<0.05)
+
+lake.cors$mamjchlsig<-as.numeric(lake.cors$mamj_chl.pvalue<=0.05)
+
+lake.cors$varsig <- lake.cors$sstsig+lake.cors$mamjchlsig
+
+lake.cors[lake.cors$sstsig==1,"sstsig"] <- "SST"
+lake.cors[lake.cors$mamjchlsig==1,"mamjchlsig"] <- "Pre-season chl"
+lake.cors[lake.cors$varsig==2,"varsig"] <- "Both"
+
+for (i in 1:nrow(lake.cors)) {
+  if (lake.cors[i,"varsig"]==1 & lake.cors[i,"sstsig"]=="SST") {
+    lake.cors[i,"varsig"] ="SST"
+  }
+  else if(lake.cors[i,"varsig"]==1 & lake.cors[i,"mamjchlsig"]=="Pre-season chl")
+    lake.cors[i,"varsig"] ="Pre-season chl"
+  else
+    next()
+}
+
+
+lake.cors[lake.cors$varsig==0,"varsig"] <- "Other/None"
+
+lake.cors.sf <- st_as_sf(lake.cors, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = lake.cors.sf, aes(color=as.factor(varsig)),size=1) + 
+  theme_bw() +  scale_color_manual(values=c("purple","gray","red","blue")) +
+  labs(color = "Significant correlation")
+
+
+lakes.phase[lakes.phase$lagoslakeid %in% lake.cors[lake.cors$varsig=="SST","lakeid"],"sigvar"] <- "SST"
+lakes.phase[lakes.phase$lagoslakeid %in% lake.cors[lake.cors$varsig=="Pre-season chl","lakeid"],"sigvar"] <- "Pre-season chl"
+lakes.phase[lakes.phase$lagoslakeid %in% lake.cors[lake.cors$varsig=="Both","lakeid"],"sigvar"] <- "Both"
+lakes.phase[lakes.phase$lagoslakeid %in% lake.cors[lake.cors$varsig==0,"lakeid"],"sigvar"] <- "None"
+
+
+ggplot(lakes.phase, aes(x=sigvar, y=mean_chl)) + 
+  geom_violin() + geom_boxplot(width=0.1)
+
+nrow(lake.cors[lake.cors$sig==T,])/nrow(lake.cors) #percent of lakes with a significant correlation
+
+
+hist(lake.cors$pc1.cor^2)
+hist(lake.cors$pc2.cor^2)
+hist(lake.cors$pc3.cor^2)
+hist(lake.cors$mamj_chl.cor^2)
+
+barplot(c(mean(lake.cors[lake.cors$sig==T,]$pc1.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$sig==T,]$pc2.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$sig==T,]$pc3.cor^2, na.rm=T),
+mean(lake.cors[lake.cors$sig==T,]$mamj_chl.cor^2,na.rm=T)),
+names.arg=c("SST pc1","pc2", "pc3","pre.chl"),
+ylim=c(0,1),
+main="Rsquared in lakes with a significant predictor")
+
+
+
+```
+
+Forecasts (SST and chl only)
+
+```{r Build Forecast and LOOCV (SST and MAMJ chl only)}
+lakes.phase<-nao.df
+
+#Create a Dataframe for predictions
+LAGOS_pcr <- data.frame("Predictions"=NA,"Observed"=NA,"Year"=NA, "lagoslakeid"=NA,"RMSE"=NA,"Rsquare"=NA,"PCR"=NA)
+
+#Select Predictors
+sig.cors<-lake.cors[lake.cors$sig==TRUE,c(1,3,5,7)]
+predictors<-data.frame("sst_pc1"=NA,"sst_pc2"=NA,"sst_pc3"=NA,"mamj_chl"=NA)
+
+for (i in 1:nrow(sig.cors)) {
+  for (j in 1:ncol(sig.cors)) {
+    predictors[i,j]<-as.numeric(sig.cors[i,j] <= 0.05)
+  }
+}
+
+predictors$lagoslakeid = lake.cors[lake.cors$sig==T,"lakeid"]
+predictors<-na.omit(predictors)
+barplot(colSums(predictors)[-5], cex.names=0.8, ylab="# of lakes w/ significance")
+
+
+####### Start loop #####################################################################################
+for (i in 1:nrow(predictors)) {
+
+#Subset the lake data
+hold<-lakes.phase %>% subset(lagoslakeid==predictors$lagoslakeid[i])
+
+#Select relevant predictors
+pred_index<-predictors[predictors$lagoslakeid==predictors$lagoslakeid[i],]==1
+pred_index<-names(predictors)[pred_index]
+lake_preds <- lakes.phase[lakes.phase$lagoslakeid==predictors$lagoslakeid[i],c(predictand[m],pred_index,"year","lagoslakeid")]
+
+#Get rid of any NA values
+lake_preds<-na.omit(lake_preds)
+
+#Get year and lakeid remove from predictors
+year<-lake_preds$year
+lagoslakeid<-lake_preds$lagoslakeid
+lake_preds<-lake_preds[,-which(names(lake_preds) %in% c("year","lagoslakeid"))]
+
+
+#If there is more than one predictor (ncol>2), proceed to PCR. If not, create a linear model
+if (ncol(lake_preds)>2) {
+  
+  index = seq(1,nrow(lake_preds)) #set up the index
+  model_drop<-matrix(,nrow=nrow(lake_preds))
+
+for (i in 1:nrow(lake_preds)){#drop one year for cross validation
+  ind<-index!=i #logical value where each column is true except ncol=i
+  train_data<-lake_preds[ind,] #returns every row of basedata except ind=i
+  test_data <- lake_preds[!ind,]
+  model <- train(
+  mean_chl~., data = train_data, method = "pcr", #The predictand in this line needs to be altered manually
+  scale = TRUE, center=TRUE
+  )
+  prediction <- model %>% predict(test_data)
+  model_drop[i,] = prediction
+}
+  RMSE = caret::RMSE(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  Rsquare = caret::R2(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  
+  LAGOS_pcr<-rbind(LAGOS_pcr, data.frame("Predictions"=model_drop,
+                                       "Year"=year,
+                                       "Observed"=lake_preds[,predictand[m]],
+                                       "lagoslakeid"=lagoslakeid,
+                                       "RMSE"=RMSE,
+                                       "Rsquare"=Rsquare,
+                                       "PCR"=TRUE))
+
+}
+else{
+  index = seq(1,nrow(lake_preds)) #set up the index
+  model_drop<-matrix(,nrow=nrow(lake_preds))
+  
+  for (i in 1:nrow(lake_preds)){#drop one year for cross validation
+  ind<-index!=i #logical value where each column is true except ncol=i
+  train_data<-lake_preds[ind,] #returns every row of basedata except ind=i
+  test_data <- lake_preds[!ind,]
+  model <- lm(
+  mean_chl~., data = train_data #The predictand in this line needs to be altered manually
+  )
+  prediction <- model %>% predict(test_data)
+  model_drop[i,] = prediction
+  
+}
+  RMSE = caret::RMSE(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  Rsquare = caret::R2(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  LAGOS_pcr<-rbind(LAGOS_pcr, data.frame("Predictions"=model_drop,
+                                       "Year"=year,
+                                       "Observed"=lake_preds[,predictand[m]],
+                                       "lagoslakeid"=lagoslakeid,
+                                       "RMSE"=RMSE,
+                                       "Rsquare"=Rsquare,
+                                       "PCR"=FALSE))
+  }
+}
+
+
+
+
+
+plot(year,model_drop, type="l",ylab="Predictions") + lines(year,lake_preds[,predictand[m]], col="green")
+
+data.frame(
+  RMSE = caret::RMSE(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T),
+  Rsquare = caret::R2(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T)
+)
+
+plot(LAGOS_pcr$Observed, LAGOS_pcr$Predictions, col=LAGOS_pcr$lagoslakeid, asp=1, pch=20, xlab="Observations", ylab="Predictions", main="SST and MAMJ chl-a") + text(-2,4,round(Rsquare,3))
+
+LAGOS_pcr<-LAGOS_pcr[-1,]
+
+length(unique(LAGOS_pcr$lagoslakeid))
+```
+
+Skill Scores (SST and chl only)
+
+```{r Skill Scores (SST and MAMJ chl only)}
+
+SkillScores<-data.frame("lagoslakeid"=NA,"RPSS"=NA,"HSS"=NA)
+lakeid <- unique(LAGOS_pcr$lagoslakeid)
+
+#Create Loop to get RPSS and HSS
+for (k in 1:length(lakeid)) {
+
+#Subset lake data
+hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==lakeid[k],]  
+#hold <- LAGOS_pcr[LAGOS_pcr$lagoslakeid==3542,]  
+
+Observed<-hold$Observed
+Predictions <- hold$Predictions
+
+err<-Observed-Predictions # difference between measurements and predictions
+verr<-as.vector(err) #error as a vector
+
+dist<-fitdist(verr,"norm") # Fitting a normal distribution to the differences b/w the predicted values and the observed values to get values for the boxplot
+
+muhat<-dist$estimate[1] #estimate of mean difference between obs and predicted
+sigmahat<-dist$estimate[2] #estimate of standard deviation around muhat
+
+rfit<-function(n,r,p1,p2,fit){
+  mR<-matrix(,ncol = n,nrow = r)
+  for (j in seq(1,n)){
+    for (i in seq(1,r)){
+    mR[i,j]<-fit(1,p1,p2) #generate random normally distributed variables
+    }
+  }
+  return(mR)
+}
+r=100 #basically bootstrapping to generate a confidence interval for the data
+n=length(Observed)
+Rnorm<-rfit(n,r,muhat,sigmahat,rnorm) # 100 randomly dist numbers generated around the difference between obs and predicted 
+yhat<-matrix(rep(Predictions, each = r),ncol=n,nrow=r) # model predictions repeated for 100 rows 
+yvarn<-yhat+Rnorm #model predictions + the distributed numbers
+yvarn[yvarn<0]<-0
+
+###########################################Calculate RPSS###########################################
+#Observed
+lower<-quantile(Observed, prob=.33) #lower third of obs predictand values
+upper<-quantile(Observed, prob=.67)
+
+#lower<-0.33 #for duration
+#upper<-0.67
+
+Obs<-matrix(0, nrow=n, ncol=3)
+for (i in seq(1,n)){
+  if (Observed[i]<=lower){ #how many obs predictand values were in lower third of obs predictand values
+    Obs[i,1]<-1
+  }
+  else if (lower<=Observed[i]&&Observed[i]<=upper){ #middle third
+    Obs[i,2]<-1
+  }
+  else{
+    Obs[i,3]<-1 #upper third
+  }
+}
+#Predicted %
+percent<-matrix(0,ncol = 3, nrow = n)
+for (i in seq(1,n)){
+  yvarn_i<-yvarn[,i]
+  for (j in seq(1:100)){
+    if (yvarn_i[j]<=lower){ #how many predictions were in lower third of obs predictand values
+     percent[i,1]<-percent[i,1]+1
+    }
+    else if (yvarn_i[j]>lower && yvarn_i[j]<upper){ #middle third of obs predictand values
+      percent[i,2]<-percent[i,2]+1
+    }
+    else{
+      percent[i,3]<-percent[i,3]+1 #upper third of obs predictand values
+    }
+  }
+}
+
+ncat<-3
+numB<-length(Obs[,1][Obs==1]) 
+numN<-length(Obs[,2]) 
+numA<-length(Obs[,3]) 
+
+perB<-(numB/n)
+perN<-(numN/n)
+perA<-(numA/n)
+
+dpercent<-percent/100 #forecasted
+
+calc_rps <- function(predicted, observed){
+  rps <- 0
+  for (i in 1:(length(predicted)-1)) {
+    sum_pred <- sum(predicted[1:i])
+    sum_obs <- sum(observed[1:i])
+    sq_err <- as.numeric((sum_pred-sum_obs)^2)
+    rps <- rps + sq_err
+  }
+  return(rps)
+}
+
+rps<-rep(0,n) #initial vector for model RPS values for each year
+rps_clim<-rep(0,n) #Same for climatology
+
+for (i in 1:n){
+  pred_vector<-as.vector(dpercent[i,])
+  obs_vector<-as.vector(Obs[i,])
+  
+  #calculate RPS for one year
+  rps_temp<-calc_rps(pred_vector,obs_vector)
+  
+  #claculate rps for climatology
+  rps_clim_temp<-calc_rps(predicted = rep(0.333333,3),obs_vector)
+  
+  #store RPS values
+  rps[i]<-rps_temp
+  rps_clim[i]<-rps_clim_temp
+}
+
+rps<-rps/(ncat-1)
+
+rps_clim<-rps_clim/(ncat-1)
+
+rpss<-1-rps/rps_clim
+
+rpss<-median(rpss)
+
+#################################### Skill matrix and HSS ###########################################
+##For calculating HSS
+percent_hold<-c(0,0,0)
+pred_m<-matrix(0,ncol = 3,nrow = n)
+for (i in seq(1:n)){
+  percent_hold<-percent[i,]
+  if (percent_hold[1]==max(percent_hold)){
+    pred_m[i,1]<-1
+  }
+  else if (percent_hold[2]==max(percent_hold)){
+    pred_m[i,2]<-1
+  }
+  else{
+    pred_m[i,3]<-1
+  }
+}
+
+pred_test<-c()
+for (i in 1:n){
+  percent_hold<-percent[i,] #Take first row from BNA repeated predictions matrix
+    if (percent_hold[1]==max(percent_hold)){ #if B is the largest category feed pred_test the lower boundary-1 (presumably to tell it which bin it should be in) Why do it like this??
+    pred_test[i]<-lower-1
+  }
+  else if (percent_hold[2]==max(percent_hold)){
+    pred_test[i]<-lower+1
+  }
+  else{
+    pred_test[i]<-upper+1
+  }
+}
+
+observed_df<-data.frame(year = year[1:n],obs = Observed[1:n])
+predicted_df<-data.frame(year = year[1:n], pred = pred_test)
+breaks<-c(0,lower,upper, Inf)
+labels<-c("Low","Normal","High")
+bin_obs<-cut(observed_df$obs,breaks,include.lowest = T,right = F, labels=labels)
+bins_pred <- cut(predicted_df$pred, breaks, include.lowest = T, right=FALSE, labels=labels)
+
+#create contingency table
+observed_df$obs_bins<-bin_obs
+observed_df$pred_bins<-bins_pred
+skill_matrix<-with(observed_df, table(obs_bins, pred_bins))
+
+#Calculate HSS
+hit_hold<-abs(Obs-pred_m)
+miss<-sum(hit_hold)/2
+hit<-n-miss
+expt_hit<-n/3
+HSS<-(hit-expt_hit)/(n-expt_hit)
+
+
+#Bind RPSS and HSS to the dataframe
+
+SkillScores <- rbind(SkillScores,c(lakeid[k],rpss,HSS))
+}
+
+
+SkillScores
+
+hist(SkillScores$RPSS, xlim=c(-1,1))
+hist(SkillScores$HSS, xlim=c(-1,1))
+```
+Maps of Skill scores
+
+```{r Map of Skill scores}
+score_hold<-LAGOS_pcr %>%
+  group_by(lagoslakeid) %>%
+  summarise(Rsquare = mean(Rsquare,na.rm=TRUE),
+            RMSE = mean(RMSE,na.rm=TRUE))
+
+SkillScores<-merge(SkillScores,score_hold,by="lagoslakeid")
+
+
+lake.geom<-unique(lakes.phase[,c("lagoslakeid","mean_long","mean_lat")])
+lake.geom<-lake.geom[lake.geom$lagoslakeid %in% lakeid,]
+lake.geom<-lake.geom[order(lake.geom$lagoslakeid),]
+
+#SkillScores<-SkillScores[-1,]
+SkillScores<-SkillScores[order(SkillScores$lagoslakeid),]
+
+
+SkillScores$lakeid <- lake.geom$lagoslakeid
+SkillScores$long <- lake.geom$mean_long
+SkillScores$lat <- lake.geom$mean_lat
+
+
+SkillScores.sf <- st_as_sf(SkillScores, coords = c("long", "lat"), crs = 4326)
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = SkillScores.sf, aes(color=RPSS)) + 
+  theme_bw() +  scale_color_viridis_c()
+
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = SkillScores.sf, aes(color=HSS>0)) + 
+  theme_bw()
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data = SkillScores.sf, aes(color=RPSS>0)) + 
+  theme_bw() 
+
+
+hist(SkillScores$RPSS,xlim=c(-1,1))
+hist(SkillScores$Rsquare,xlim=c(0,1))
+hist(SkillScores$HSS)
+
+sum(as.numeric(SkillScores$RPSS>0))/nrow(SkillScores)
+sum(as.numeric(SkillScores$HSS>0))/nrow(SkillScores)
+
+```
+
+
+
+```{r Hydroclimate pred figure code}
+mag.dur.hydro<-merge(lake.cors[,c("othersig","lakeid","lat","long")],magnitude.cors[,c("othersig","lakeid","lat","long")],by="lakeid")
+
+mag.dur.hydro[mag.dur.hydro$othersig.x=="Other","othersig.x"] <-1
+mag.dur.hydro[mag.dur.hydro$othersig.y=="Other","othersig.y"] <-2
+
+
+mag.dur.hydro$othersig.x<-as.numeric(mag.dur.hydro[,"othersig.x"])
+mag.dur.hydro$othersig.y<-as.numeric(mag.dur.hydro[,"othersig.y"])
+
+mag.dur.hydro$hydropreds = rowSums(mag.dur.hydro[,c("othersig.x","othersig.y")])
+
+mag.dur.hydro.sf<-st_as_sf(mag.dur.hydro, coords = c("long.y", "lat.y"), crs = 4326)
+
+
+mag.dur.hydro.sf[mag.dur.hydro.sf$hydropreds==1,"hydropreds"] <- "Duration"
+mag.dur.hydro.sf[mag.dur.hydro.sf$hydropreds==2,"hydropreds"] <- "Magnitude"
+mag.dur.hydro.sf[mag.dur.hydro.sf$hydropreds==3,"hydropreds"] <- "Both"
+mag.dur.hydro.sf[mag.dur.hydro.sf$hydropreds==0,"hydropreds"] <- NA
+
+
+ggplot() + 
+  geom_sf(data = states) +
+  geom_sf(data=states2, alpha=0.2) +
+  geom_sf(data=lake.cors.sf,size=0.4, color="gray60") +
+  geom_sf(data = na.omit(mag.dur.hydro.sf), aes(color=as.factor(hydropreds)),size=0.8) +
+  theme_bw() +  scale_color_manual(values=c("tomato","skyblue","purple2","NA")) +
+  labs(color = "")
+```
+
+
+```{r Significant Variables figure code}
+varsig_fig<-predictors
+
+varsig_fig$numpreds<-rowSums(varsig_fig[,c(1:8)])
+
+
+figure<-data.frame(rbind(colSums(varsig_fig[varsig_fig$numpreds==1,c(2:9)]),
+      colSums(varsig_fig[varsig_fig$numpreds==2,c(2:9)]),
+      colSums(varsig_fig[varsig_fig$numpreds==3,c(2:9)]),
+      colSums(varsig_fig[varsig_fig$numpreds==4,c(2:9)])))
+
+
+
+figure<-prop.table(t(figure),2) #proportions
+
+#figure<-t(figure) #counts
+
+figure<-rbind(figure,"SST"=colSums(figure[c(2:4),]))
+
+figure<-figure[-c(2:4),]
+
+colnames(figure) <- c(1,2,3,4)
+
+rownames(figure) <- c("Precipitation", "Extreme events", "Air temperature","Soil moisture","Pre-season chl","SST" )
+
+colors = c("dodgerblue","hotpink","light blue","forest green","chartreuse2","tomato")
+
+opar = par(oma = c(0,0,0,8)) # Large right margin for plot
+barplot(figure,col=colors, xlab="Number of predictors" ,ylim=c(0,1),ylab="Proportion")
+legend("bottom",        # Add legend to plot
+       legend = c(rownames(figure)),
+       col = colors,
+       pch = 16,
+       cex = 0.7,
+       bty="n",
+       ncol=1)
+par(opar) # Reset par
+
+
+barplot(table(varsig_fig$numpreds),ylim=c(0,100))
+
+
+table<-table(varsig_fig$numpreds)
+table<-c(table,0)
+
+table<-rbind(table(magnitude_fig$numpreds),table)
+
+rownames(table) <- c("Magnitude","Duration")
+
+opar = par(oma = c(0,0,0,8)) # Large right margin for plot
+barplot(table,beside=T,ylim=c(0,100), col=c("gray30","lightgray"), xlab="Number of predictors",ylab="Number of models")
+legend("right", legend = rownames(table), fill=c("gray30","lightgray"),"bty"="n")
+```
+
+```{r Autocorrelation}
+
+
+variables = c("mean_chl","dur","MAMJ_prcp","sst_pc1","sst_pc2","sst_pc3","MAMJ_ee","MAMJ_tmean","MAMJ_sm","mamj_chl")
+lake.id<-unique(lakes.phase$lagoslakeid)
+
+layout(matrix(1:10, ncol=2))
+par(oma=c(4, 4, 4, 4), mar=c(2, 1, 1, 1))
+for (m in 1:length(variables)) {
+
+
+
+
+#lakes.phase<-nao.df
+
+
+
+autocor_df = data.frame("lagoslakeid"=NA,"autocorrelation"=NA,"lag"=NA,"sig"=NA)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.phase %>% subset(lagoslakeid==lake.id[i])
+  if (nrow(hold)>5) {
+    if (sum(na.omit(hold[,variables[m]]))>0) {
+      
+   
+    autocor<-acf(na.omit(hold[,variables[m]]),plot=F)
+    #plot(autocor)
+    significance_level <- qnorm((1 + 0.95)/2)/sqrt(sum(!is.na(hold[,variables[m]]))) #95% confidence, https://www.squaregoldfish.co.uk/programming/r_acf_significance.md/
+
+ }
+
+autocor_hold<-data.frame("lagoslakeid"=lake.id[i],"autocorrelation"=autocor$acf,"lag"=autocor$lag,"sig"=as.numeric(abs(autocor$acf)>=significance_level))
+autocor_df<-rbind(autocor_df,autocor_hold)
+
+  }
+}
+
+
+
+print(variables[m])
+nrow(autocor_df)
+summarize_autocors<-autocor_df %>% group_by(lagoslakeid) %>% summarize(numautocors = sum(sig))
+breaks=seq(1,max(summarize_autocors$numautocors,na.rm=T))
+summarize_autocors=na.omit(summarize_autocors)
+hist(summarize_autocors$numautocors, ylab="",main=variables[m],xlab="",breaks=breaks,xlim=c(0,11),right=T)
+print(sum(as.numeric(summarize_autocors$numautocors>2))/nrow(summarize_autocors)*100)
+print(sum(as.numeric(summarize_autocors$numautocors>2)))
+#lag_cors<-autocor_df %>% group_by(lag) %>% summarize(numautocors = sum(sig))
+
+#plot(lag_cors$lag,lag_cors$numautocors,type="l")
+
+}
+
+
+  
+```
+Trying Random Forest (can deal with autocorrelation)
+
+```{r Random forest Regression}
+set.seed(123)
+library(randomForest)
+modeltype="RF"
+lakes.phase<-chl.df
+
+#Choose best cell predictor set for magnitude or duration
+if (m==1) { #If magnitude, remove duration fields and rename
+  lakes.phase<-lakes.phase[,-which(names(lakes.phase) %in% c("MAMJ_prcp_dur","MAMJ_ee_dur","MAMJ_sm_dur"))]
+  colnames(lakes.phase)[which(colnames(lakes.phase) %in% c("MAMJ_prcp_mean","MAMJ_ee_mean","MAMJ_sm_mean"))] <-c("MAMJ_prcp","MAMJ_sm","MAMJ_ee")
+} else{ #If duration, remove magnitude fields and rename
+  lakes.phase<-lakes.phase[,-which(names(lakes.phase) %in% c("MAMJ_prcp_mean","MAMJ_ee_mean","MAMJ_sm_mean"))]
+  colnames(lakes.phase)[which(colnames(lakes.phase) %in% c("MAMJ_prcp_dur","MAMJ_ee_dur","MAMJ_sm_dur"))] <-c("MAMJ_prcp","MAMJ_sm","MAMJ_ee")
+}
+
+
+
+#Create a Dataframe for predictions
+LAGOS_pcr <- data.frame("Predictions"=NA,"Observed"=NA,"Year"=NA, "lagoslakeid"=NA,"RMSE"=NA,"Rsquare"=NA,"PCR"=NA)
+
+#Select Predictors
+sig.cors<-lake.cors[lake.cors$sig==TRUE,c(1,3,5,7,9,11,13,15)]
+sig.cors[is.na(sig.cors)==TRUE] <- 99
+predictors<-data.frame("MAMJ_prcp"=NA,"sst_pc1"=NA,"sst_pc2"=NA,"sst_pc3"=NA,"MAMJ_ee"=NA,"MAMJ_tmean"=NA,"MAMJ_sm"=NA,"mamj_chl"=NA)
+
+
+for (i in 1:nrow(sig.cors)) {
+  for (j in 1:ncol(sig.cors)) {
+    predictors[i,j]<-as.numeric(sig.cors[i,j] < 0.05)
+  }
+}
+
+#How many lakes sst and mamj chl retained for
+# table(rowSums(predictors[,c("sst_pc1","sst_pc2","sst_pc3")])>0)
+# table(predictors[,c("mamj_chl")]>0)
+
+numberpreds<-rowSums(predictors[,c(1:8)])
+table(numberpreds)
+
+predictors$lagoslakeid = lake.cors[lake.cors$sig==T,"lakeid"]
+predictors<-na.omit(predictors)
+predsplot<-colSums(predictors)[-9]
+
+predictors[predictors$mamj_chl==0&predictors$sst_pc1==0&predictors$sst_pc2==0&predictors$sst_pc3==0,]
+
+predictors[predictors$MAMJ_prcp==1|predictors$MAMJ_ee==1|predictors$MAMJ_sm==1|predictors$MAMJ_tmean==1,]
+
+predictors[predictors$MAMJ_prcp==1|predictors$MAMJ_ee==1|predictors$MAMJ_sm==1,]
+
+predictors[predictors$sst_pc1==1&predictors$MAMJ_ee==1&predictors$mamj_chl==1,]
+
+
+
+# test<-predictors[rowSums(predictors[,c(1:8)])==1,c(1,5,6,7,9)]
+# predictors<-test[rowSums(test[,c(1:4)])>0,] #Lakes with one sig predictor that is not SST or pre-season chl (7)
+
+
+
+####### Start loop ####################################################################################
+for (i in 1:nrow(predictors)) {
+
+names(lakes.phase)[names(lakes.phase)==predictand[m]] <- "predictand"
+
+#Subset the lake data
+hold<-lakes.phase %>% subset(lagoslakeid==predictors$lagoslakeid[i])
+
+#Select relevant predictors
+pred_index<-predictors[predictors$lagoslakeid==predictors$lagoslakeid[i],]==1
+pred_index<-names(predictors)[pred_index]
+lake_preds <- lakes.phase[lakes.phase$lagoslakeid==predictors$lagoslakeid[i],c("predictand",pred_index,"year","lagoslakeid")]
+
+
+#Get rid of any NA values
+lake_preds<-na.omit(lake_preds)
+
+#Get year and lakeid remove from predictors
+year<-lake_preds$year
+lagoslakeid<-lake_preds$lagoslakeid
+lake_preds<-lake_preds[,-which(names(lake_preds) %in% c("year","lagoslakeid"))]
+
+#If there is more than one predictor (ncol>2), proceed to PCR. If not, create a linear model
+if (modeltype=="RF") {
+  
+  index = seq(1,nrow(lake_preds)) #set up the index
+  model_drop<-matrix(,nrow=nrow(lake_preds))
+
+
+for (i in 1:nrow(lake_preds)){#drop one year for cross validation
+  ind<-index!=i #logical value where each column is true except ncol=i
+  train_data<-lake_preds[ind,] #returns every row of basedata except ind=i
+  test_data <- lake_preds[!ind,]
+
+  model<-randomForest(predictand~., data = train_data, ntrees=500)
+  prediction <- model %>% predict(test_data)
+  model_drop[i,] = prediction
+  
+}
+  names(lake_preds)[names(lake_preds)=="predictand"] <- predictand[m]
+  RMSE = caret::RMSE(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  Rsquare = caret::R2(model_drop, lake_preds[,predictand[m]], na.rm=T)
+  
+  LAGOS_pcr<-rbind(LAGOS_pcr, data.frame("Predictions"=model_drop,
+                                       "Year"=year,
+                                       "Observed"=lake_preds[,predictand[m]],
+                                       "lagoslakeid"=lagoslakeid,
+                                       "RMSE"=RMSE,
+                                       "Rsquare"=Rsquare,
+                                       "PCR"=TRUE))
+
+}
+
+
+}
+
+LAGOS_pcr<-LAGOS_pcr[-1,]
+
+if (m==3) {
+  LAGOS_pcr[LAGOS_pcr$Predictions<0,"Predictions"] <- 0
+  LAGOS_pcr[LAGOS_pcr$Predictions>1,"Predictions"] <- 1
+}
+
+
+plot(year,model_drop, type="l",ylab="Predictions") + lines(year,lake_preds[,predictand[m]], col="green")
+
+
+
+data.frame(
+  RMSE = caret::RMSE(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T),
+  Rsquare = caret::R2(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T)
+)
+
+Rsquare = caret::R2(LAGOS_pcr$Predictions, LAGOS_pcr$Observed, na.rm=T)
+
+plot(LAGOS_pcr$Observed, LAGOS_pcr$Predictions, col=LAGOS_pcr$lagoslakeid, asp=1, pch=20, xlab="Observations", ylab="Predictions", main="All Predictors") + text(-2,4,round(Rsquare,3))
+
+
+colSums(table(unique(LAGOS_pcr[,c("lagoslakeid","PCR")])))
+
+length(unique(LAGOS_pcr$lagoslakeid))
+
+#Magnitude
+par(mar=c(4,10,4,4))
+barplot((predsplot[order(predsplot)]/nrow(predictors))*100, names.arg=c("Soil Moisture","Air Temperature","Precipitation","SST PC3","SST PC2","Extreme Events","SST PC1","Pre-season log(chlorophyll-a)"), cex.names=0.8,las=1,horiz=T,xlim=c(0,100), xlab="Percent of lakes")
+
+#Duration
+par(mar=c(4,10,4,4))
+barplot((predsplot[order(predsplot)]/nrow(predictors))*100, names.arg=c("Soil Moisture","Precipitation","SST PC3","Air Temperature","Extreme Events","Pre-season log(chlorophyll-a)","SST PC1","SST PC2"), cex.names=0.8,las=1,horiz=T,xlim=c(0,100), xlab="Percent of lakes")
+
+
+#numpreds_dur<-(table(numberpreds)/135)*100
+
+(predsplot[order(predsplot)]/nrow(predictors))*100
+
+numpred_plot<-rbind(data.frame(numpreds_mag,"Metric"="Magnitude"),data.frame(numpreds_dur,"Metric"="Duration"))
+numpred_plot<-rbind(numpred_plot,c("numberpreds"=5,"Freq"=0,"Metric"="Duration"))
+
+ggplot(data=numpred_plot, aes(x=numberpreds,y=as.numeric(Freq), fill=Metric)) + geom_bar(stat="identity", position=position_dodge()) +theme_classic() + ylab("Percent of lakes") + xlab("Number of predictors") + scale_fill_manual(values=c("skyblue","purple3"))
+
+mean(LAGOS_pcr$Rsquare, na.rm=T)
+min(LAGOS_pcr$Rsquare, na.rm=T)
+max(LAGOS_pcr$Rsquare, na.rm=T)
+
+```
+
+

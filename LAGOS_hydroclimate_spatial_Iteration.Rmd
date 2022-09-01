@@ -1,0 +1,1580 @@
+
+Libraries
+
+```{r Libraries}
+library(LAGOSNE)
+library(dplyr)
+library(ggplot2)
+library(maps)
+library(sf)
+library(devtools) #needed to download prism from github
+library(reshape2) ##melting dataframes
+library(raster) ##working with raster data
+library(sp) ##manipulationg spatial data
+library(prism) ##prism data access
+library(ggmap)
+library(lubridate)
+library(nlme)
+library(rgdal)
+library(dataRetrieval)
+library(tidyr)
+library(readr)
+library(png)
+library(tidyverse)
+library(caret)
+library(pls)
+library(fitdistrplus)
+library(plsVarSel)
+library(verification)
+library(psych)
+library(httr)
+library(elevatr)
+library(rgeos)
+library(ncdf4) # package for netcdf manipulation
+```
+
+
+Spatial iteration for selecting gridded data predictors for LAGOS chl
+
+```{r Spatial Iteration w/ closest grids}
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+#data <- read.csv("NIPA_NAO46_Lagos.csv")
+data<-read.csv("chl_vars.csv")
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+#Variables single months
+varnames <- c("mar_prcp","apr_prcp","may_prcp","june_prcp")
+#varnames <- c("mar_tmp","apr_tmp","may_tmp","june_tmp")
+
+#varnames averaged
+av_varname <- c("MAMJ_prcp")
+#av_varname <- c("MAMJ_tmp")
+
+
+#Set spatial points data frame
+loi.chla.sp<-SpatialPointsDataFrame(coords=data[,c('mean_long','mean_lat')], 
+                       data=data, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+#Set to backup drive data source
+path <- "/Volumes/Data Drive/prism"
+prism_set_dl_dir(path)
+
+#Choose type of data ('ppt','tmp')
+monthly_prism_prcp<-prism_archive_subset("ppt", "monthly", mon = 3:6, years = min(data$year):max(data$year))
+prcp_path<-pd_to_file(monthly_prism_prcp)
+
+
+l2 = list("PrcpData") #List for final data frames
+
+if (averages==FALSE) {
+  ii=4
+}else{
+  ii=1
+}
+
+for (ii in 1:ii) {
+#Want to iterate through lakes and see which prcp grid surrounding the lake correlated best
+# Use rough measurement of 1.11km = 0.01 dd, 4km = 0.036 dd
+
+grid_spacing = 0.036
+
+#Individual months precip
+l = list("Correlations") #Create a list to store multiple correlation dataframes
+
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,
+                         "mean_chl"=NA,"chl95"=NA,"dur"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,
+                         "varname"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+
+if (averages==FALSE) {
+names(lakes.prcp)[8] <- varnames[ii]
+}else {
+  names(lakes.prcp)[8] <- av_varname
+}
+
+
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "chl95.pvalue"=NA,"chl95.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA)
+
+lat_ind<-c(-1,0,1,-1,0,1,-1,0,1)
+long_ind<-c(-1,-1,-1,0,0,0,1,1,1)
+
+################### Start Loop ######
+for (j in 1:length(lat_ind)) {
+  
+#This outside loop tests 9 grids of monthly precip data from PRISM around the original LAGOS data point
+sp.long<-loi.chla.sp@coords[,1] + long_ind[j]*grid_spacing #1st column long
+sp.lat<-loi.chla.sp@coords[,2] + lat_ind[j]*grid_spacing #2nd column lat
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "chl95"=loi.chla.sp@data$chl95,
+                    "dur" = loi.chla.sp@data$dur,
+                     "mean_long"=sp.long,
+                     "mean_lat"=sp.lat)
+
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+
+
+### This loop is for extracting data ###
+  for (i in seq(from=ii, to=length(prcp_path),by=4)) {
+    if (averages == FALSE) { #If averages=FALSE, extract one month at a time and test cors
+      RS <- raster(prcp_path[i]) 
+      year<-as.numeric(substr(names(RS),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::extract(RS, ex,fun=mean, na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold)
+        names(hold)[8] <- varnames[ii]
+        lakes.prcp<-rbind(lakes.prcp,hold)
+      }
+      else
+        next()
+    }
+    else{ #if averages = TRUE look at MAMJ averaged grids
+      RS3 <- raster(prcp_path[i])
+      RS4 <- raster(prcp_path[i+1])
+      RS5 <- raster(prcp_path[i+2])
+      RS6 <- raster(prcp_path[i+3])
+      RSsum<-sum(RS3,RS4,RS5,RS6)
+      year<-as.numeric(substr(names(RS3),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::extract(RSsum, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold)
+        names(hold)[8] <- av_varname
+        lakes.prcp<-rbind(lakes.prcp,hold)
+     }
+    else {
+      next()
+    }
+    }
+  }
+
+
+
+### This loop is for generating correlations for each lake ###
+  for (k in 1:length(lake.id)) {
+  hold<-lakes.prcp %>% subset(lagoslakeid==lake.id[k])
+  mean.cor<-corr.test(hold$mean_chl,hold[,8],, use="pairwise",adjust="none",ci=FALSE)
+  chl95.cor<-corr.test(hold$chl95,hold[,8], use="pairwise",adjust="none",ci=FALSE)
+  dur.cor<-corr.test(hold$dur,hold[,8],, use="pairwise",adjust="none",ci=FALSE)
+  string<-data.frame("mean.pvalue"=mean.cor$p,
+                   "mean.cor"=mean.cor$r,
+                   "chl95.pvalue"=chl95.cor$p,
+                   "chl95.cor"=chl95.cor$r,
+                   "dur.pvalue"=dur.cor$p,
+                   "dur.cor"=dur.cor$r,
+                   "lagoslakeid"=hold$lagoslakeid)
+  lake.cors<-rbind(lake.cors,string)
+  }
+
+l[[j]] <- lake.cors
+
+#Reset the lake.cors dataframe
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "chl95.pvalue"=NA,"chl95.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA)
+
+#Reset the precipitation dataframe
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,
+                         "mean_chl"=NA,"chl95"=NA,"dur"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,
+                         "varname"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+if (averages==FALSE) {
+names(lakes.prcp)[8] <- varnames[ii]
+}else {
+  names(lakes.prcp)[8] <- av_varname
+}
+
+}
+
+cordf<-data.frame("lagoslakeid"=NA,"R2_meanchl"=NA)
+
+
+### This Loop is for identifying which grid produced the highest correlation ###
+for (i in 1:9) {
+cormatrix<-l[[i]] %>% group_by(lagoslakeid) %>% summarise("R2_meanchl"=mean(mean.cor^2))
+cordf<-cbind(cordf,cormatrix)  
+}
+
+#clean up dataframe of R^2 values and find highest value for each lake
+cordf<-cordf[,-c(1,2,5,7,9,11,13,15,17,19)]
+maxR2<-apply(cordf[,-1],1,FUN=max)
+
+grid_hold<-rep(NA,length(lake.id))
+
+for (i in 1:length(lake.id)) {
+  grid_hold[i]<-which(cordf[i,-1]==maxR2[i])
+}
+
+best_grids<-as.data.frame(cbind(grid_hold,"lagoslakeid"=na.omit(cordf$lagoslakeid)))
+
+
+########### Now extract data from best grids ############################
+
+for (j in 1:nrow(best_grids)) {
+sp.long<-loi.chla.sp@coords[,1] + long_ind[best_grids$grid_hold[j]]*grid_spacing #1st column long
+sp.lat<-loi.chla.sp@coords[,2] + lat_ind[best_grids$grid_hold[j]]*grid_spacing #2nd column lat
+}
+
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "chl95"=loi.chla.sp@data$chl95,
+                    "dur" = loi.chla.sp@data$dur,
+                     "mean_long"=sp.long,
+                     "mean_lat"=sp.lat)
+
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+lakes.prcp <- data.frame("year"=NA,"lagoslakeid"=NA,
+                         "mean_chl"=NA,"chl95"=NA,"dur"=NA,
+                         "mean_long"=NA,"mean_lat"=NA,
+                         "varname"=NA,"mean_long.1"=NA,"mean_lat.1"=NA)
+if (averages==FALSE) {
+names(lakes.prcp)[8] <- varnames[ii]
+}else {
+  names(lakes.prcp)[8] <- av_varname
+}
+
+
+#In the sequence 1 = march, 2 = april, 3 = may, 4 = june
+  for (i in seq(from=ii, to=length(prcp_path),by=4)) {
+    if (averages==FALSE) {
+      RS <- raster(prcp_path[i]) 
+      year<-as.numeric(substr(names(RS),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::extract(RS, ex,fun=mean, na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold)
+        names(hold)[8] <- varnames[ii]
+        lakes.prcp<-rbind(lakes.prcp,hold)
+      }
+      else{
+        next()}
+    }
+    else{ #if averages = TRUE get the MAMJ summed grids
+      RS3 <- raster(prcp_path[i])
+      RS4 <- raster(prcp_path[i+1])
+      RS5 <- raster(prcp_path[i+2])
+      RS6 <- raster(prcp_path[i+3])
+      RSsum<-sum(RS3,RS4,RS5,RS6)
+      year<-as.numeric(substr(names(RS3),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::extract(RSsum, ex ,fun=mean, na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold)
+        names(hold)[8] <- av_varname
+        lakes.prcp<-rbind(lakes.prcp,hold)
+      }
+      else {
+        next()
+      }
+    }
+  }
+
+if (averages==FALSE) {
+  l2[[ii]] <-lakes.prcp[-1,c("lagoslakeid","year",varnames[ii])]
+} else {
+  l2[[ii]] <-lakes.prcp[-1,c("lagoslakeid","year",av_varname)]
+}
+print(ii)
+}
+
+l2
+lakes.prcp
+
+#mar<-lakes.prcp[-1,c("lagoslakeid","mar_prcp")]
+```
+
+
+
+```{r Look at correlations}
+lakes.phase<-data
+
+best_prcp<-as.data.frame(l2)
+#best_prcp<-best_prcp[,c("lagoslakeid","year","mar_prcp","apr_prcp","may_prcp","june_prcp")]
+#best_prcp$total_prcp <- rowSums(best_prcp[,c(3:6)])
+
+
+lakes.phase<-merge(data[c("lagoslakeid","year","mean_chl")],best_prcp,by=c("lagoslakeid","year"))
+
+#lakes.phase<-merge(lakes.phase, loi.mam.agg, by=c("lagoslakeid","year"), all.x=TRUE)
+
+#lakes.phase<-nao.df[nao.df$TSI=="1"|nao.df$TSI=="2",]
+#lakes.phase<-nao.df[nao.df$TSI=="3"|nao.df$TSI=="4",]
+#lakes.phase<-nao.df
+
+lake.id<-unique(lakes.phase$lagoslakeid)
+
+
+
+lake.cors<-data.frame("prcp.pvalue"=NA,"prcp.cor"=NA)
+
+for (i in 1:length(lake.id)) {
+hold<-lakes.phase %>% subset(lagoslakeid==lake.id[i])
+  if (nrow(hold)>2) {
+prcp.cor<-cor.test(hold$mean_chl,hold$MAMJ_prcp)
+string<-data.frame("prcp.pvalue"=prcp.cor$p.value,
+                   "prcp.cor"=prcp.cor$estimate)
+lake.cors<-rbind(lake.cors,string)
+  }
+else
+  lakes.phase<-lakes.phase %>% subset(lagoslakeid!=lake.id[i])
+  next
+}
+
+
+#4 for normal june, 8 for total
+sum(as.numeric(lake.cors$prcp.pvalue<=0.05),na.rm=T)
+
+lake.cors[lake.cors$prcp.pvalue<=0.05,]
+
+hist(lake.cors$prcp.cor^2)
+
+```
+
+Spatial Iterations within watersheds
+
+
+```{r Watershed Iterations - Precipitation}
+huc12<-st_read("~/Desktop/LAGOS_HUC12/LAGOS_HUC12_update")
+
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+
+huc12<-st_transform(huc12,proj4string)
+
+
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+#data <- read.csv("NIPA_NAO46_Lagos.csv")
+data<-read.csv("chl_vars.csv")
+data$mean_chl<-log(data$mean_chl)#Take log of chl-a
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+
+#Variables single months
+varnames <- c("mar_prcp","apr_prcp","may_prcp","june_prcp")
+#varnames <- c("mar_tmp","apr_tmp","may_tmp","june_tmp")
+
+#varnames averaged
+av_varname <- c("MAMJ_prcp")
+#av_varname <- c("MAMJ_tmp")
+
+
+#Set spatial points data frame
+loi.chla.sp<-SpatialPointsDataFrame(coords=data[,c('mean_long','mean_lat')], 
+                       data=data, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+#Also get spatial features to join with watersheds
+loi.chla.sf<-st_as_sf(loi.chla.sp)
+loi.chla.sf<-st_transform(loi.chla.sf,proj4string)
+
+
+huc12.lakes<-st_join(
+  huc12,
+  loi.chla.sf[,c("lagoslakeid","mean_chl","chl95","dur")],
+  join = st_intersects
+)
+
+huc12.unique<-st_join(
+  huc12,
+  loi.chla.sf[,"lagoslakeid"],
+  join = st_intersects
+)
+
+huc12.unique<-unique(huc12.unique)
+
+#Set to backup drive data source
+path <- "/Volumes/Data Drive/prism"
+prism_set_dl_dir(path)
+
+#Choose type of data ('ppt','tmp')
+monthly_prism_prcp<-prism_archive_subset("ppt", "monthly", mon = 3:6, years = min(data$year):max(data$year))
+prcp_path<-pd_to_file(monthly_prism_prcp)
+
+
+l2 = list("PrcpData") #List for final data frames
+
+if (averages==FALSE) {
+  ii=4
+}else{
+  ii=1
+}
+
+
+#Individual months precip
+l = list("Correlations") #Create a list to store multiple correlation dataframes
+
+
+lakes.prcp <- data.frame("cell"=NA,"value"=NA,"year"=NA,"lagoslakeid"=NA,
+                        "mean_chl"=NA,"chl95"=NA,"dur"=NA)
+
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA,"cell"=NA)
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "chl95"=loi.chla.sp@data$chl95,
+                    "dur" = loi.chla.sp@data$dur,
+                     "mean_long"=loi.chla.sp@data$mean_long,
+                     "mean_lat"=loi.chla.sp@data$mean_lat)
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+if (averages==FALSE) {
+names(lakes.prcp)[2] <- varnames[ii]
+}else {
+  names(lakes.prcp)[2] <- av_varname
+}
+
+huc12.unique<-huc12.unique[!is.na(huc12.unique$lagoslakeid),]
+######################################### Start Loop ####################################################
+
+#Need to get index for grids within a watershed
+for (j in 1:nrow(huc12.unique)) {
+  
+#Crop the wraster by the lake watershed and turn into data frame
+#wshedcrop<-raster::crop(prcp_path,huc12.lakes[j,"geometry"])
+#wshedcrop.df<-as.data.frame(wshedcrop,xy=T)
+
+points.sub<-points.sp[points.sp$lagoslakeid %in% huc12.unique[j,"lagoslakeid"]$lagoslakeid,]
+
+# Get elevation data
+elev_edge <- get_elev_raster(huc12.unique[j,"geometry"], z = 7)
+elev_edge<-crop(elev_edge,huc12.unique[j,"geometry"]) #Crop to watershed
+lake_elev<-raster::extract(elev_edge,points.sub[1,],fun=mean) #Get elevation of lake
+elev_aoi<-elev_edge>=lake_elev #determine areas above lake elevation
+if (max(elev_aoi@data@values)==1) {
+elev.aoi.sp<-rasterToPolygons(elev_aoi,fun=function(x){x>0},na.rm = TRUE,dissolve = TRUE)
+wshed<-as(huc12.unique[j,],"Spatial") #get watershed in SpatialPolygonDataFrame
+elev.aoi.sp<-spTransform(elev.aoi.sp,proj4string)
+elev.clip<-gIntersection(elev.aoi.sp,wshed, byid = T, drop_lower_td = T) #Clip elev to wshed
+elev.clip.sf<-st_as_sf(elev.clip) #back to sf
+} else{next()}
+
+
+#plot(elev.clip.sf) #Plot the clipped area of interest for raster grids
+#plot(elev_edge) + plot(wshed, add=T) #Plot elevation data and watershed of interest
+
+### This loop is for extracting data ###
+  for (i in seq(from=ii, to=length(prcp_path),by=4)) {
+    if (averages == FALSE) { #If averages=FALSE, extract one month at a time and test cors
+      RS <- raster(prcp_path[i]) 
+      year<-as.numeric(substr(names(RS),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points[points@data$year==year,]
+        hold<-raster::crop(RS, huc12.lakes[j,"geometry"], na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold, xy=TRUE)
+        names(hold)[8] <- varnames[ii]
+        lakes.prcp<-rbind(lakes.prcp,hold)
+      }
+      else
+        next()
+    }
+    else{ #if averages = TRUE look at MAMJ averaged grids
+      RS3 <- raster(prcp_path[i])
+      RS4 <- raster(prcp_path[i+1])
+      RS5 <- raster(prcp_path[i+2])
+      RS6 <- raster(prcp_path[i+3])
+      RSsum<-sum(RS3,RS4,RS5,RS6)
+      year<-as.numeric(substr(names(RS3),24,27))
+      if (year %in% unique(points.sub$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::crop(RSsum, elev.clip.sf, na.rm=TRUE, sp=TRUE)
+        hold<-raster::extract(hold, elev.clip.sf, na.rm=TRUE, cellnumbers=T)
+        hold<-data.frame(hold)
+        hold$year <- year
+        hold$lagoslakeid <- points.sub[1,"lagoslakeid"]$lagoslakeid
+        hold$mean_chl <- points.sub[points.sub$year==year,"mean_chl"]$mean_chl
+        hold$chl95 <- points.sub[points.sub$year==year,"chl95"]$chl95
+        hold$dur <- points.sub[points.sub$year==year,"dur"]$dur
+        names(hold)[2] <- av_varname
+        #names(hold)[1] <- year
+        lakes.prcp<-rbind(lakes.prcp,hold)
+     }
+    else {
+      next()
+    }
+    }
+  }
+print(huc12.unique$lagoslakeid[j])
+print(j)
+}
+
+#write.csv(lakes.prcp,"~/Desktop/LAGOS_wshed_iterations_prcp.csv")
+lakes.prcp<-read.csv("~/Desktop/PhD/LAGOS_Forecasts/Data/LAGOS_wshed_iterations_prcp_update.csv")
+
+
+lakes.prcp<-na.omit(lakes.prcp)
+lakes.prcp$mean_chl <- as.numeric(lakes.prcp$mean_chl)
+
+
+
+### This loop is for generating correlations for each lake ###
+  for (k in 1:nrow(huc12.unique)) {
+    if (huc12.unique[k,"lagoslakeid"]$lagoslakeid %in% lakes.prcp$lagoslakeid) {
+        
+      #Subset the data for a given lake
+       hold1<-lakes.prcp %>% subset(lagoslakeid==huc12.unique[k,"lagoslakeid"]$lagoslakeid)
+       hold1<-na.omit(hold1)
+       
+       if (nrow(hold1)==0) {
+         next()
+       }
+       
+       #Test watershed average of precipitation first
+       wshed_avg<-aggregate(hold1$MAMJ_prcp,by=list(hold1$year),FUN=mean,na.rm=T)
+       
+       wshedavg_meancorr<-corr.test(wshed_avg[,2],
+                            hold1[hold1$cell==unique(hold1$cell)[1],"mean_chl"],
+                            use="pairwise",adjust="none",ci=FALSE)
+      
+       wshedavg_durcorr<-corr.test(wshed_avg[,2],
+                            hold1[hold1$cell==unique(hold1$cell)[1],"dur"],
+                            use="pairwise",adjust="none",ci=FALSE)
+       
+       string <-data.frame("mean.pvalue"=wshedavg_meancorr$p,
+                   "mean.cor"=wshedavg_meancorr$r,
+                   "dur.pvalue"=wshedavg_durcorr$p,
+                   "dur.cor"=wshedavg_durcorr$r,
+                   "lagoslakeid"=hold1$lagoslakeid[1],
+                   "cell"="watershed_average")
+       lake.cors<-rbind(lake.cors,string)
+       
+    for (c in 2:length(unique(hold1$cell))) {
+    hold<-hold1[hold1$cell==unique(hold1$cell)[c],]
+      mean.cor<-corr.test(hold$mean_chl,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+      dur.cor<-corr.test(hold$dur,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+      string<-data.frame("mean.pvalue"=mean.cor$p,
+                   "mean.cor"=mean.cor$r,
+                   "dur.pvalue"=dur.cor$p,
+                   "dur.cor"=dur.cor$r,
+                   "lagoslakeid"=hold$lagoslakeid[1],
+                   "cell"=hold$cell[1])
+      lake.cors<-rbind(lake.cors,string)
+    }
+    } else{next()}
+  }
+
+
+
+if (averages==FALSE) {
+names(lakes.prcp)[8] <- varnames[ii]
+}else {
+  names(lakes.prcp)[8] <- av_varname
+}
+
+
+best_cells<-data.frame("lagoslakeid"=NA,"cell"=NA)
+
+#Choose duration or magnitude
+sig.cors<-na.omit(lake.cors[lake.cors$mean.pvalue<0.05,])
+#sig.cors<-na.omit(lake.cors[lake.cors$dur.pvalue<0.05,])
+lakeid.sig<-unique(sig.cors$lagoslakeid)
+
+for (k in 1:length(lakeid.sig)) {
+    if (lakeid.sig[k] %in% sig.cors$lagoslakeid) {
+  hold1<-sig.cors %>% subset(lagoslakeid==lakeid.sig[k])
+    best_cells<-rbind(best_cells,
+                      hold1[max(abs(hold1$mean.cor)) == abs(hold1$mean.cor),c("lagoslakeid","cell")])
+    } else{next()}
+  }
+
+best_cells<-na.omit(best_cells)
+
+########### Now extract data from best grids ############################
+
+lakes.subset<-lakes.prcp %>% subset(lagoslakeid %in% lakeid.sig)
+best_cell_data <- data.frame(lakes.subset[1,])
+best_cell_data<-best_cell_data[NA,]
+
+
+for (k in 1:nrow(best_cells)) {
+  hold<-lakes.subset %>% subset(lagoslakeid==best_cells$lagoslakeid[k])
+  best_cell_data<-rbind(best_cell_data,hold %>% subset(cell==best_cells$cell[k]))
+}
+
+best_cell_data
+
+
+# #Double Check Correlations
+#   for (k in 1:length(lakeid.sig)) {
+#   hold<-best_cell_data %>% subset(lagoslakeid==lakeid.sig[k])
+#       mean.cor<-corr.test(hold$mean_chl,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+#       chl95.cor<-corr.test(hold$chl95,hold[,2], use="pairwise",adjust="none",ci=FALSE)
+#       dur.cor<-corr.test(hold$dur,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+#       string<-data.frame("mean.pvalue"=mean.cor$p,
+#                    "mean.cor"=mean.cor$r,
+#                    "chl95.pvalue"=chl95.cor$p,
+#                    "chl95.cor"=chl95.cor$r,
+#                    "dur.pvalue"=dur.cor$p,
+#                    "dur.cor"=dur.cor$r,
+#                    "lagoslakeid"=hold$lagoslakeid[1],
+#                    "cell"=hold$cell[1])
+#       lake.cors<-rbind(lake.cors,string)
+#     }
+
+length(unique(best_cell_data$lagoslakeid))
+length(unique(lakes.prcp$lagoslakeid))
+
+#write.csv(best_cell_data,"~/Desktop/LAGOS_prcp_bestcells_dur.csv")
+
+
+```
+
+
+```{r Figures of watershed iteration}
+i=2
+
+
+test<-raster(prcp_path[3])
+
+wshedcrop<-raster::crop(test,huc12.unique[i,"geometry"])
+wshedcrop.df<-as.data.frame(wshedcrop,xy=T)
+
+
+# Get elevation data
+elev_edge <- get_elev_raster(huc12.unique[i,"geometry"], z = 7)
+elev_edge<-crop(elev_edge,huc12.unique[i,"geometry"]) #Crop to watershed
+lake_elev<-raster::extract(elev_edge,loi.chla.sf[loi.chla.sf$lagoslakeid==huc12.unique[i,"lagoslakeid"]$lagoslakeid,"geometry"],fun=mean) #Get elevation of lake
+elev_aoi<-elev_edge>lake_elev #determine areas above lake elevation
+elev.aoi.sp<-rasterToPolygons(elev_aoi,fun=function(x){x>0},na.rm = TRUE,dissolve = TRUE)
+wshed<-as(huc12.unique[i,],"Spatial") #get watershed in SpatialPolygonDataFrame
+elev.clip<-gIntersection(elev.aoi.sp,wshed, byid = T, drop_lower_td = T) #Clip elev to wshed
+elev.clip.sf<-st_as_sf(elev.clip) #back to sf
+
+
+ggplot(huc12.unique[i,"geometry"]) + 
+  geom_raster(data=wshedcrop.df,aes(x=x,y=y,fill=wshedcrop.df[,3]), alpha=0.9) +
+  scale_fill_gradient(low="skyblue",high="darkblue") +
+  geom_sf(data=elev.clip.sf, fill="gray", alpha=0.5) +
+  geom_sf(fill=NA,col="white") +
+  geom_sf(data=loi.chla.sf[loi.chla.sf$lagoslakeid==huc12.unique[i,"lagoslakeid"]$lagoslakeid,"geometry"], col="red") +
+  labs(fill="Precipitation (mm)") + xlab("") + ylab("")
+
+  
+```
+
+Daily Precipitation for Extreme Events
+
+```{r Bring in Daily precip data}
+
+huc12<-st_read("~/Desktop/LAGOS_HUC12")
+
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+
+huc12<-st_transform(huc12,proj4string)
+
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+#data <- read.csv("NIPA_NAO46_Lagos.csv")
+data<-read.csv("chl_vars.csv")
+data$mean_chl<-log(data$mean_chl)#Take log of chl-a
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+#Variables single months
+varnames <- c("mar_prcp","apr_prcp","may_prcp","june_prcp")
+
+#varnames averaged
+av_varname <- c("MAMJ_prcp")
+
+#Set to backup drive data source
+path <- "/Volumes/Data Drive/prism"
+prism_set_dl_dir(path)
+
+#Choose type of data ('ppt','tmp')
+monthly_prism_prcp<-prism_archive_subset("ppt", "daily", mon = 3:6, years = min(data$year):max(data$year))
+prcp_path<-pd_to_file(monthly_prism_prcp)
+
+
+
+
+
+for (j in 1:length(unique(data$year))) {
+monthly_prism_prcp<-prism_archive_subset("ppt", "daily", mon = 3:6, years = unique(data$year)[j])
+prcp_path<-pd_to_file(monthly_prism_prcp)
+  
+  for (i in 1:length(prcp_path)) { #Loop to remove any corrupt files
+    t<-try(raster(prcp_path[i]))
+    if("try-error" %in% class(t)) {prcp_path<-prcp_path[-i]}
+  }
+dailyprcp<-stack(prcp_path)
+dailyprcp.aoi<-crop(dailyprcp,extent(huc12))
+
+EE<-dailyprcp.aoi>=25
+EEsum<-calc(EE, sum, na.rm = TRUE)
+
+writeRaster(EEsum,paste("/Volumes/Data Drive/PRISM_MAMJ_ExtremeEvents/EE_",unique(data$year)[j], ".tif", sep = ""),format="GTiff")
+
+j
+
+}
+
+plot(EEsum)
+
+paste("/Volumes/Data Drive/PRISM_MAMJ_ExtremeEvents/EE_",unique(data$year)[j], ".tif", sep = "")
+
+seq(20,40,by=0.5)
+
+```
+
+Iterate Daily Precipitation
+-Threshold for NE = 40mm
+-Threshold for MW = 20mm
+
+```{r Watershed Iterations - Daily Precipitation (Extreme Events), warning=FALSE}
+
+ee_files<-list.files("/Volumes/Data Drive/PRISM_MAMJ_mult_ExtremeEvents",full.names = T)
+
+huc12<-st_read("~/Desktop/LAGOS_HUC12/LAGOS_HUC12_update")
+
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+
+huc12<-st_transform(huc12,proj4string)
+
+
+#Get NE and MW region (new hampshire included b/c very borderline lakes present - actually in vermont but need nh to capture in NE category)
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+states.sub<-filter(states, ID %in% c("new york","vermont","rhode island","maine",
+                                     "michigan","wisconsin","minnesota","ohio","missouri","pennsylvania","new hampshire"))
+states.sub[states.sub$ID %in% c("new york","vermont","rhode island","maine","pennsylvania","new hampshire"), "cluster"] <- "Northeast"
+states.sub[states.sub$ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"), "cluster"] <- "Midwest"
+
+
+
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+#data <- read.csv("NIPA_NAO46_Lagos.csv")
+data<-read.csv("chl_vars.csv")
+data$mean_chl<-log(data$mean_chl)#Take log of chl-a
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+#varnames averaged
+av_varname <- c("MAMJ_ee")
+
+
+#Join regions
+data.sf<- st_as_sf(data, coords = c("mean_long", "mean_lat"), crs = 4326)
+
+data.sf<-st_join(
+  data.sf,
+  states.sub[,"cluster"],
+  join = st_within
+)
+
+coords<-st_coordinates(data.sf)
+data<-st_drop_geometry(data.sf)
+data<-as.data.frame(data)
+data<-cbind(data,coords)
+names(data)[c(7,8)] <- c("mean_long","mean_lat")
+
+
+#Set spatial points data frame
+loi.chla.sp<-SpatialPointsDataFrame(coords=data[,c('mean_long','mean_lat')], 
+                       data=data, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+#Also get spatial features to join with watersheds
+loi.chla.sf<-st_as_sf(loi.chla.sp)
+loi.chla.sf<-st_transform(loi.chla.sf,proj4string)
+
+
+huc12.unique<-st_join(
+  huc12,
+  loi.chla.sf[,"lagoslakeid"],
+  join = st_intersects
+)
+
+huc12.unique<-unique(huc12.unique)
+
+
+l2 = list("PrcpData") #List for final data frames
+
+if (averages==FALSE) {
+  ii=4
+}else{
+  ii=1
+}
+
+
+
+#Individual months precip
+l = list("Correlations") #Create a list to store multiple correlation dataframes
+
+
+lakes.prcp <- data.frame("cell"=NA,"value"=NA,"year"=NA,"lagoslakeid"=NA,
+                        "mean_chl"=NA,"chl95"=NA,"dur"=NA)
+
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA,"cell"=NA)
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "chl95"=loi.chla.sp@data$chl95,
+                    "dur" = loi.chla.sp@data$dur,
+                    "cluster"=loi.chla.sp@data$cluster,
+                     "mean_long"=loi.chla.sp@data$mean_long,
+                     "mean_lat"=loi.chla.sp@data$mean_lat)
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+if (averages==FALSE) {
+names(lakes.prcp)[2] <- varnames[ii]
+}else {
+  names(lakes.prcp)[2] <- av_varname
+}
+
+huc12.unique<-huc12.unique[!is.na(huc12.unique$lagoslakeid),]
+######################################### Start Loop ####################################################
+
+#Need to get index for grids within a watershed
+for (j in 1:nrow(huc12.unique)) {
+
+points.sub<-points.sp[points.sp$lagoslakeid %in% huc12.unique[j,"lagoslakeid"]$lagoslakeid,]
+
+
+if (points.sub$cluster=="Northeast"){ #Use NE threshold
+  ee_files_sub = ee_files[grepl("_40.tif",ee_files)]
+} else { #Use Midwest threshold
+  ee_files_sub = ee_files[grepl("_20.tif",ee_files)]
+}
+
+
+# Get elevation data
+elev_edge <- get_elev_raster(huc12.unique[j,"geometry"], z = 7)
+elev_edge<-crop(elev_edge,huc12.unique[j,"geometry"]) #Crop to watershed
+lake_elev<-raster::extract(elev_edge,points.sub[1,],fun=mean) #Get elevation of lake
+elev_aoi<-elev_edge>=lake_elev #determine areas above lake elevation
+if (max(elev_aoi@data@values)==1) {
+elev.aoi.sp<-rasterToPolygons(elev_aoi,fun=function(x){x>0},na.rm = TRUE,dissolve = TRUE)
+wshed<-as(huc12.unique[j,],"Spatial") #get watershed in SpatialPolygonDataFrame
+elev.aoi.sp<-spTransform(elev.aoi.sp,proj4string)
+elev.clip<-gIntersection(elev.aoi.sp,wshed, byid = T, drop_lower_td = T) #Clip elev to wshed
+elev.clip.sf<-st_as_sf(elev.clip) #back to sf
+} else{next()}
+
+
+
+### This loop is for extracting data ###
+  for (i in 1:length(ee_files_sub)) {
+    if (averages == FALSE) { #If averages=FALSE, extract one month at a time and test cors
+      RS <- raster(prcp_path[i]) 
+      year<-as.numeric(substr(names(RS),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points[points@data$year==year,]
+        hold<-raster::crop(RS, huc12.lakes[j,"geometry"], na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold, xy=TRUE)
+        names(hold)[8] <- varnames[ii]
+        lakes.prcp<-rbind(lakes.prcp,hold)
+      }
+      else
+        next()
+    }
+    else{ #if averages = TRUE look at MAMJ summed extreme event grids
+      RS3 <- raster(ee_files_sub[i])
+      RSmean <- RS3
+      year<-as.numeric(substr(names(RS3),4,7))
+      if (year %in% unique(points.sub$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::crop(RSmean, elev.clip.sf, na.rm=TRUE, sp=TRUE)
+        hold<-raster::extract(hold, elev.clip.sf, na.rm=TRUE, cellnumbers=T)
+        hold<-data.frame(hold)
+        hold$year <- year
+        hold$lagoslakeid <- points.sub[1,"lagoslakeid"]$lagoslakeid
+        hold$mean_chl <- points.sub[points.sub$year==year,"mean_chl"]$mean_chl
+        hold$chl95 <- points.sub[points.sub$year==year,"chl95"]$chl95
+        hold$dur <- points.sub[points.sub$year==year,"dur"]$dur
+        names(hold)[2] <- av_varname
+        #names(hold)[1] <- year
+        lakes.prcp<-rbind(lakes.prcp,hold)
+     }
+    else {
+      next()
+    }
+    }
+  }
+print(huc12.unique$lagoslakeid[j])
+print(j)
+}
+
+
+#write.csv(lakes.prcp,"~/Desktop/PhD/LAGOS_Forecasts/Data/LAGOS_wshed_iterations_NEMW_ee.csv")
+lakes.prcp<-read.csv("~/Desktop/PhD/LAGOS_Forecasts/Data/LAGOS_wshed_iterations_NEMW_ee.csv")
+lakes.prcp<-na.omit(lakes.prcp)
+lakes.prcp<-lakes.prcp[,-1]
+lakes.prcp$mean_chl<-as.numeric(lakes.prcp$mean_chl)
+lakes.prcp$dur<-as.numeric(lakes.prcp$dur)
+
+
+### This loop is for generating correlations for each lake ###
+  for (k in 1:nrow(huc12.unique)) {
+    if (huc12.unique[k,"lagoslakeid"]$lagoslakeid %in% lakes.prcp$lagoslakeid) {
+        
+      #Subset the data for a given lake
+       hold1<-lakes.prcp %>% subset(lagoslakeid==huc12.unique[k,"lagoslakeid"]$lagoslakeid)
+       hold1<-na.omit(hold1)
+       
+       if (nrow(hold1)==0) {
+         next()
+       }
+       
+       #Test watershed average of precipitation first
+       wshed_avg<-aggregate(hold1$MAMJ_ee,by=list(hold1$year),FUN=mean,na.rm=T)
+       
+       wshedavg_meancorr<-corr.test(wshed_avg[,2],
+                            hold1[hold1$cell==unique(hold1$cell)[1],"mean_chl"],
+                            use="pairwise",adjust="none",ci=FALSE)
+      
+       wshedavg_durcorr<-corr.test(wshed_avg[,2],
+                            hold1[hold1$cell==unique(hold1$cell)[1],"dur"],
+                            use="pairwise",adjust="none",ci=FALSE)
+       
+       string <-data.frame("mean.pvalue"=wshedavg_meancorr$p,
+                   "mean.cor"=wshedavg_meancorr$r,
+                   "dur.pvalue"=wshedavg_durcorr$p,
+                   "dur.cor"=wshedavg_durcorr$r,
+                   "lagoslakeid"=hold1$lagoslakeid[1],
+                   "cell"="watershed_average")
+       lake.cors<-rbind(lake.cors,string)
+       
+    for (c in 2:length(unique(hold1$cell))) {
+    hold<-hold1[hold1$cell==unique(hold1$cell)[c],]
+      mean.cor<-corr.test(hold$mean_chl,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+      dur.cor<-corr.test(hold$dur,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+      string<-data.frame("mean.pvalue"=mean.cor$p,
+                   "mean.cor"=mean.cor$r,
+                   "dur.pvalue"=dur.cor$p,
+                   "dur.cor"=dur.cor$r,
+                   "lagoslakeid"=hold$lagoslakeid[1],
+                   "cell"=hold$cell[1])
+      lake.cors<-rbind(lake.cors,string)
+    }
+    } else{next()}
+  }
+
+
+
+
+if (averages==FALSE) {
+names(lakes.prcp)[8] <- varnames[ii]
+}else {
+  names(lakes.prcp)[8] <- av_varname
+}
+
+
+best_cells<-data.frame("lagoslakeid"=NA,"cell"=NA)
+
+sig.cors<-na.omit(lake.cors[lake.cors$mean.pvalue<0.05,])
+lakeid.sig<-unique(sig.cors$lagoslakeid)
+
+for (k in 1:length(lakeid.sig)) {
+    if (lakeid.sig[k] %in% sig.cors$lagoslakeid) {
+  hold1<-sig.cors %>% subset(lagoslakeid==lakeid.sig[k])
+    best_cells<-rbind(best_cells,hold1[max(abs(hold1$mean.cor)) == abs(hold1$mean.cor),c("lagoslakeid","cell")])
+    } else{next()}
+  }
+
+best_cells<-na.omit(best_cells)
+
+########### Now extract data from best grids ######
+
+lakes.subset<-lakes.prcp %>% subset(lagoslakeid %in% lakeid.sig)
+best_cell_data <- data.frame(lakes.subset[1,])
+best_cell_data<-best_cell_data[NA,]
+
+for (k in 1:nrow(best_cells)) {
+  hold<-lakes.subset %>% subset(lagoslakeid==best_cells$lagoslakeid[k])
+  best_cell_data<-rbind(best_cell_data,hold %>% subset(cell==best_cells$cell[k]))
+}
+
+best_cell_data
+length(unique(best_cell_data$lagoslakeid))
+
+#write.csv(best_cell_data,"~/Desktop/PhD/LAGOS_Forecasts/Data/LAGOS_ee_bestcells_dur.csv")
+
+
+
+```
+
+
+
+soil moisture
+
+```{r Bring in Soil Moisture Data, warning=FALSE}
+#Watershed
+huc12<-st_read("~/Desktop/LAGOS_HUC12/LAGOS_HUC12_update")
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+huc12<-st_transform(huc12,proj4string)
+
+#Get soil moisute data ready
+
+nc.files<-list.files("~/Desktop/PhD/LAGOS_forecasts/data/SoilMoisture",full.names = T)
+#nc.files<-nc.files[grepl("COMBINED-MONTHLY",nc.files)]
+nc.files<-nc.files[grepl("COMBINED",nc.files)]
+
+nc.files<-nc.files[-c(1:4)] #remove 1981
+
+year<-as.numeric(substr(abs(as.numeric(parse_number(substr(nc.files,104,108)))),1,4))
+year
+
+month<-rep(c(01,02,03,04),128/4)
+sm.names<-paste(year,month)
+
+sm.stack<-stack(nc.files, varname="sm")
+sm.stack.aoi<-crop(sm.stack,extent(huc12))
+names(sm.stack.aoi) <- sm.names
+
+
+```
+
+
+```{r Watershed Iterations - soil moisture}
+huc12<-st_read("~/Desktop/LAGOS_HUC12/LAGOS_HUC12_update")
+
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+
+huc12<-st_transform(huc12,proj4string)
+
+
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+#data <- read.csv("NIPA_NAO46_Lagos.csv")
+data<-read.csv("chl_vars.csv")
+data$mean_chl<-log(data$mean_chl)#Take log of chl-a
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+#Variables single months
+varnames <- c("mar_prcp","apr_prcp","may_prcp","june_prcp")
+#varnames <- c("mar_tmp","apr_tmp","may_tmp","june_tmp")
+
+#varnames averaged
+av_varname <- c("MAMJ_sm")
+#av_varname <- c("MAMJ_tmp")
+
+
+#Set spatial points data frame
+loi.chla.sp<-SpatialPointsDataFrame(coords=data[,c('mean_long','mean_lat')], 
+                       data=data, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+#Also get spatial features to join with watersheds
+loi.chla.sf<-st_as_sf(loi.chla.sp)
+loi.chla.sf<-st_transform(loi.chla.sf,proj4string)
+
+
+huc12.unique<-st_join(
+  huc12,
+  loi.chla.sf[,"lagoslakeid"],
+  join = st_intersects
+)
+
+huc12.unique<-unique(huc12.unique)
+
+
+l2 = list("PrcpData") #List for final data frames
+
+if (averages==FALSE) {
+  ii=4
+}else{
+  ii=1
+}
+
+
+
+#Individual months precip
+l = list("Correlations") #Create a list to store multiple correlation dataframes
+
+
+lakes.prcp <- data.frame("cell"=NA,"value"=NA,"year"=NA,"lagoslakeid"=NA,
+                        "mean_chl"=NA,"chl95"=NA,"dur"=NA)
+
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA,"cell"=NA)
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "chl95"=loi.chla.sp@data$chl95,
+                    "dur" = loi.chla.sp@data$dur,
+                     "mean_long"=loi.chla.sp@data$mean_long,
+                     "mean_lat"=loi.chla.sp@data$mean_lat)
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+if (averages==FALSE) {
+names(lakes.prcp)[2] <- varnames[ii]
+}else {
+  names(lakes.prcp)[2] <- av_varname
+}
+
+huc12.unique<-huc12.unique[!is.na(huc12.unique$lagoslakeid),]
+######################################### Start Loop ####################################################
+
+#Need to get index for grids within a watershed
+for (j in 1:nrow(huc12.unique)) {
+  
+#Crop the wraster by the lake watershed and turn into data frame
+#wshedcrop<-raster::crop(prcp_path,huc12.lakes[j,"geometry"])
+#wshedcrop.df<-as.data.frame(wshedcrop,xy=T)
+
+points.sub<-points.sp[points.sp$lagoslakeid %in% huc12.unique[j,"lagoslakeid"]$lagoslakeid,]
+
+# Get elevation data
+elev_edge <- get_elev_raster(huc12.unique[j,"geometry"], z = 7)
+elev_edge<-crop(elev_edge,huc12.unique[j,"geometry"]) #Crop to watershed
+lake_elev<-raster::extract(elev_edge,points.sub[1,],fun=mean) #Get elevation of lake
+elev_aoi<-elev_edge>=lake_elev #determine areas above lake elevation
+if (max(elev_aoi@data@values)==1) {
+elev.aoi.sp<-rasterToPolygons(elev_aoi,fun=function(x){x>0},na.rm = TRUE,dissolve = TRUE)
+wshed<-as(huc12.unique[j,],"Spatial") #get watershed in SpatialPolygonDataFrame
+elev.aoi.sp<-spTransform(elev.aoi.sp,proj4string)
+elev.clip<-gIntersection(elev.aoi.sp,wshed, byid = T, drop_lower_td = T) #Clip elev to wshed
+elev.clip.sf<-st_as_sf(elev.clip) #back to sf
+} else{next()}
+
+
+#plot(elev.clip.sf) #Plot the clipped area of interest for raster grids
+#plot(elev_edge) + plot(wshed, add=T) #Plot elevation data and watershed of interest
+#plot(hold) + plot(wshed, add=T)
+#plot(RSmean)
+
+### This loop is for extracting data ###
+  for (i in seq(from=ii, to=length(nc.files),by=4)) {
+    if (averages == FALSE) { #If averages=FALSE, extract one month at a time and test cors
+      RS <- raster(prcp_path[i]) 
+      year<-as.numeric(substr(names(RS),24,27))
+      if (year %in% unique(data$year)) {
+        ex<-points[points@data$year==year,]
+        hold<-raster::crop(RS, huc12.lakes[j,"geometry"], na.rm=TRUE, sp=TRUE)
+        hold <- as.data.frame(hold, xy=TRUE)
+        names(hold)[8] <- varnames[ii]
+        lakes.prcp<-rbind(lakes.prcp,hold)
+      }
+      else
+        next()
+    }
+    else{ #if averages = TRUE look at MAMJ averaged grids
+      RS3 <- sm.stack.aoi[[i]]
+      RS4 <- sm.stack.aoi[[i+1]]
+      RS5 <- sm.stack.aoi[[i+2]]
+      RS6 <- sm.stack.aoi[[i+3]]
+      RSmean<-mean(RS3,RS4,RS5,RS6,na.rm=TRUE)
+      year<-as.numeric(substr(names(RS3),2,5))
+      if (year %in% unique(points.sub$year)) {
+        ex<-points.sp[points.sp@data$year==year,]
+        hold<-raster::crop(RSmean, elev.clip.sf, na.rm=TRUE, sp=TRUE)
+        hold<-raster::extract(hold, elev.clip.sf, na.rm=TRUE, cellnumbers=T)
+        hold<-data.frame(hold)
+        hold$year <- year
+        hold$lagoslakeid <- points.sub[1,"lagoslakeid"]$lagoslakeid
+        hold$mean_chl <- points.sub[points.sub$year==year,"mean_chl"]$mean_chl
+        hold$chl95 <- points.sub[points.sub$year==year,"chl95"]$chl95
+        hold$dur <- points.sub[points.sub$year==year,"dur"]$dur
+        names(hold)[2] <- av_varname
+        #names(hold)[1] <- year
+        lakes.prcp<-rbind(lakes.prcp,hold)
+     }
+    else {
+      next()
+    }
+    }
+  }
+print(huc12.unique$lagoslakeid[j])
+print(j)
+}
+
+#write.csv(lakes.prcp,"~/Desktop/LAGOS_wshed_iterations_sm.csv")
+lakes.prcp<-read.csv("~/Desktop/PhD/LAGOS_Forecasts/Data/LAGOS_wshed_iterations_sm.csv")
+lakes.prcp<-na.omit(lakes.prcp)
+lakes.prcp$mean_chl<-as.numeric(lakes.prcp$mean_chl)
+lakes.prcp$dur<-as.numeric(lakes.prcp$dur)
+
+
+
+  for (k in 1:nrow(huc12.unique)) {
+    if (huc12.unique[k,"lagoslakeid"]$lagoslakeid %in% lakes.prcp$lagoslakeid) {
+        
+      #Subset the data for a given lake
+       hold1<-lakes.prcp %>% subset(lagoslakeid==huc12.unique[k,"lagoslakeid"]$lagoslakeid)
+       hold1<-na.omit(hold1)
+       
+       if (nrow(hold1)==0) {
+         next()
+       }
+       
+       #Test watershed average of precipitation first
+       wshed_avg<-aggregate(hold1$MAMJ_sm,by=list(hold1$year),FUN=mean,na.rm=T)
+       
+       wshedavg_meancorr<-corr.test(wshed_avg[,2],
+                            hold1[hold1$cell==unique(hold1$cell)[1],"mean_chl"],
+                            use="pairwise",adjust="none",ci=FALSE)
+      
+       wshedavg_durcorr<-corr.test(wshed_avg[,2],
+                            hold1[hold1$cell==unique(hold1$cell)[1],"dur"],
+                            use="pairwise",adjust="none",ci=FALSE)
+       
+       string <-data.frame("mean.pvalue"=wshedavg_meancorr$p,
+                   "mean.cor"=wshedavg_meancorr$r,
+                   "dur.pvalue"=wshedavg_durcorr$p,
+                   "dur.cor"=wshedavg_durcorr$r,
+                   "lagoslakeid"=hold1$lagoslakeid[1],
+                   "cell"="watershed_average")
+       lake.cors<-rbind(lake.cors,string)
+       
+    for (c in 2:length(unique(hold1$cell))) {
+    hold<-hold1[hold1$cell==unique(hold1$cell)[c],]
+      mean.cor<-corr.test(hold$mean_chl,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+      dur.cor<-corr.test(hold$dur,hold[,2],use="pairwise",adjust="none",ci=FALSE)
+      string<-data.frame("mean.pvalue"=mean.cor$p,
+                   "mean.cor"=mean.cor$r,
+                   "dur.pvalue"=dur.cor$p,
+                   "dur.cor"=dur.cor$r,
+                   "lagoslakeid"=hold$lagoslakeid[1],
+                   "cell"=hold$cell[1])
+      lake.cors<-rbind(lake.cors,string)
+    }
+    } else{next()}
+  }
+
+
+
+
+if (averages==FALSE) {
+names(lakes.prcp)[8] <- varnames[ii]
+}else {
+  names(lakes.prcp)[8] <- av_varname
+}
+
+
+best_cells<-data.frame("lagoslakeid"=NA,"cell"=NA)
+
+sig.cors<-na.omit(lake.cors[lake.cors$mean.pvalue<0.05,])
+#sig.cors<-na.omit(lake.cors[lake.cors$dur.pvalue<0.05,])
+lakeid.sig<-unique(sig.cors$lagoslakeid)
+length(sig.cors)
+
+for (k in 1:length(lakeid.sig)) {
+    if (lakeid.sig[k] %in% sig.cors$lagoslakeid) {
+  hold1<-sig.cors %>% subset(lagoslakeid==lakeid.sig[k])
+    best_cells<-rbind(best_cells,hold1[max(abs(hold1$mean.cor)) == abs(hold1$mean.cor),c("lagoslakeid","cell")])
+    } else{next()}
+  }
+
+best_cells<-na.omit(best_cells)
+
+########### Now extract data from best grids ############################
+
+lakes.subset<-lakes.prcp %>% subset(lagoslakeid %in% lakeid.sig)
+best_cell_data <- data.frame(lakes.subset[1,])
+best_cell_data<-best_cell_data[NA,]
+
+for (k in 1:nrow(best_cells)) {
+  hold<-lakes.subset %>% subset(lagoslakeid==best_cells$lagoslakeid[k])
+  best_cell_data<-rbind(best_cell_data,hold %>% subset(cell==best_cells$cell[k]))
+}
+
+length(unique(best_cell_data$lagoslakeid))
+best_cell_data
+
+
+#write.csv(best_cell_data,"~/Desktop/PhD/LAGOS_Forecasts/Data/LAGOS_sm_bestcells_mean.csv")
+
+```
+
+
+
+```{r Get multiple thresholds for extreme events}
+huc12<-st_read("~/Desktop/LAGOS_HUC12/LAGOS_HUC12_update")
+
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+
+huc12<-st_transform(huc12,proj4string)
+
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+#data <- read.csv("NIPA_NAO46_Lagos.csv")
+data<-read.csv("chl_vars.csv")
+data$mean_chl<-log(data$mean_chl)#Take log of chl-a
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+#Variables single months
+varnames <- c("mar_prcp","apr_prcp","may_prcp","june_prcp")
+
+#varnames averaged
+av_varname <- c("MAMJ_prcp")
+
+#Set to backup drive data source
+path <- "/Volumes/Data Drive/prism"
+prism_set_dl_dir(path)
+
+#Choose type of data ('ppt','tmp')
+monthly_prism_prcp<-prism_archive_subset("ppt", "daily", mon = 3:6, years = min(data$year):max(data$year))
+prcp_path<-pd_to_file(monthly_prism_prcp)
+
+
+
+
+
+for (j in 1:length(unique(data$year))) {
+monthly_prism_prcp<-prism_archive_subset("ppt", "daily", mon = 3:6, years = unique(data$year)[j])
+prcp_path<-pd_to_file(monthly_prism_prcp)
+  
+  for (i in 1:length(prcp_path)) { #Loop to remove any corrupt files
+    t<-try(raster(prcp_path[i]))
+    if("try-error" %in% class(t)) {prcp_path<-prcp_path[-i]}
+  }
+dailyprcp<-stack(prcp_path)
+dailyprcp.aoi<-crop(dailyprcp,extent(huc12))
+
+  for (k in 1:length(seq(20,40,by=1))) {
+    EE<-dailyprcp.aoi>=seq(20,40,by=1)[k]
+    EEsum<-calc(EE, sum, na.rm = TRUE)
+  
+
+      writeRaster(EEsum,paste("/Volumes/Data Drive/PRISM_MAMJ_mult_ExtremeEvents/EE_",unique(data$year)[j],"_",seq(20,40,by=1)[k], ".tif", sep = ""),format="GTiff")
+
+    }
+
+j
+
+}
+
+
+
+```
+
+```{r Look at correlations for different EE thresholds, warning=FALSE}
+
+ee_files<-list.files("/Volumes/Data Drive/PRISM_MAMJ_mult_ExtremeEvents",full.names = T)
+
+huc12<-st_read("~/Desktop/LAGOS_HUC12/LAGOS_HUC12_update")
+
+proj4string <- "+proj=longlat +datum=NAD83 +no_defs"
+
+huc12<-st_transform(huc12,proj4string)
+
+
+#Settings
+averages = TRUE
+
+#Input data
+setwd("~/Desktop/PhD/LAGOS_Forecasts/Data")
+data<-read.csv("chl_vars.csv")
+data$mean_chl<-log(data$mean_chl)#Take log of chl-a
+lake.id <- unique(data$lagoslakeid)
+data<-data[,c("lagoslakeid","year","mean_lat","mean_long","mean_chl","chl95","dur")]
+
+#varnames averaged
+av_varname <- c("MAMJ_ee")
+
+
+#Set spatial points data frame
+loi.chla.sp<-SpatialPointsDataFrame(coords=data[,c('mean_long','mean_lat')], 
+                       data=data, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+#Also get spatial features to join with watersheds
+loi.chla.sf<-st_as_sf(loi.chla.sp)
+loi.chla.sf<-st_transform(loi.chla.sf,proj4string)
+
+
+
+huc12.unique<-st_join(
+  huc12,
+  loi.chla.sf[,"lagoslakeid"],
+  join = st_intersects
+)
+
+huc12.unique<-unique(huc12.unique)
+
+
+l2 = list("PrcpData") #List for final data frames
+
+if (averages==FALSE) {
+  ii=4
+}else{
+  ii=1
+}
+
+
+#Individual months precip
+l = list("Correlations") #Create a list to store multiple correlation dataframes
+
+
+lakes.prcp <- data.frame("cells"=NA,"MAMJ_ee"=NA,"year"=NA,"lagoslakeid"=NA,
+                        "mean_chl"=NA,"dur"=NA, "thresh"=NA)
+
+lake.cors<-data.frame("mean.pvalue"=NA,"mean.cor"=NA,
+                      "dur.pvalue"=NA,"dur.cor"=NA,"lagoslakeid"=NA,"cell"=NA)
+
+#Now create the new Spatial Points Data Frame
+points <- data.frame("year"=loi.chla.sp@data$year,
+                    "lagoslakeid"=loi.chla.sp@data$lagoslakeid,
+                     "mean_chl" = loi.chla.sp@data$mean_chl,
+                    "dur" = loi.chla.sp@data$dur,
+                     "mean_long"=loi.chla.sp@data$mean_long,
+                     "mean_lat"=loi.chla.sp@data$mean_lat)
+points.sp<-SpatialPointsDataFrame(coords=points[,c('mean_long','mean_lat')], 
+                       data=points, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+
+if (averages==FALSE) {
+names(lakes.prcp)[2] <- varnames[ii]
+}else {
+  names(lakes.prcp)[2] <- av_varname
+}
+
+huc12.unique<-huc12.unique[!is.na(huc12.unique$lagoslakeid),]
+######################################### Start Loop ####################################################
+
+#Need to get index for grids within a watershed
+for (j in 1:nrow(huc12.unique)) {
+  
+
+points.sub<-points.sp[points.sp$lagoslakeid %in% huc12.unique[j,"lagoslakeid"]$lagoslakeid,]
+
+
+### This loop is for extracting data ###
+  for (i in 1:length(ee_files)) {#if averages = TRUE look at MAMJ summed extreme event grids
+      RS3 <- raster(ee_files[i])
+      RSmean <- RS3
+      year<-as.numeric(substr(names(RS3),4,7))
+      if (year %in% unique(points.sub$year)) {
+        ex<-points.sub[points.sub@data$year==year,]
+        hold<-raster::extract(RSmean,ex, na.rm=TRUE, cellnumbers=T)
+        hold<-data.frame(hold)
+        hold$year <- year
+        hold$lagoslakeid <- points.sub[1,"lagoslakeid"]$lagoslakeid
+        hold$mean_chl <- points.sub[points.sub$year==year,"mean_chl"]$mean_chl
+        hold$dur <- points.sub[points.sub$year==year,"dur"]$dur
+        hold$thresh <- substr(names(RS3),9,10)
+        names(hold)[2] <- av_varname
+        lakes.prcp<-rbind(lakes.prcp,hold)
+     }
+    else {
+      next()
+    }
+  }
+print(huc12.unique$lagoslakeid[j])
+print(j)
+}
+
+
+
+lakes.prcp$thresh<-as.numeric(lakes.prcp$thresh)
+lakes.prcp<-na.omit(lakes.prcp)
+
+corframe = data.frame("r" = NA,"p"=NA,"thresh"=NA,"lagoslakeid"=NA)
+
+for (thresh in 20:40) {
+ hold<-lakes.prcp[lakes.prcp$thresh==thresh,]
+
+  for (id in 1:length(unique(lakes.prcp$lagoslakeid))) {
+    hold2 <-hold[hold$lagoslakeid==unique(hold$lagoslakeid)[id],]
+    corstore<-cor.test(hold2$mean_chl,hold2$MAMJ_ee)
+    corframe<-rbind(corframe,c("r"=corstore$estimate,"p"=corstore$p.value,"thresh"=unique(hold2$thresh),"lagoslakeid"=unique(hold2$lagoslakeid)))
+  }
+}
+
+
+
+
+#Look into different thresholds
+
+corframe<-na.omit(corframe)
+
+thresh_agg<-aggregate(abs(corframe$r),by=list(corframe$thresh),mean,na.rm=T)
+
+plot(thresh_agg$Group.1,thresh_agg$x, type="b", ylim=c(0,1), xlab="EE thresholds", ylab="average absolute r")
+
+corframe$sig<-as.numeric(corframe$p<0.05)
+
+thresh_agg<-aggregate(abs(corframe$sig),by=list(corframe$thresh),sum,na.rm=T)
+
+plot(thresh_agg$Group.1,(thresh_agg$x/179)*100, type="b", ylab="% Lakes where EE is signficant", xlab="EE thresholds")
+
+length(unique(corframe[corframe$sig==1,"id"]))
+
+
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+states.sub<-filter(states, ID %in% c("new york","vermont","rhode island","maine","michigan","wisconsin","minnesota","ohio","missouri","pennsylvania"))
+states.sub[states.sub$ID %in% c("new york","vermont","rhode island","maine","pennsylvania"), "cluster"] <- "Northeast"
+states.sub[states.sub$ID %in% c("michigan","wisconsin","minnesota","ohio","missouri"), "cluster"] <- "Midwest"
+
+
+
+corframe_merge<-merge(corframe,data[,c("mean_lat","mean_long","lagoslakeid")],by="lagoslakeid")
+corframe_merge<-unique(corframe_merge)
+
+cluster.sf<- st_as_sf(corframe_merge, coords = c("mean_long", "mean_lat"), crs = 4326)
+
+sub.sf<-st_join(cluster.sf,states.sub, join = st_within) 
+
+aggregate(abs(sub.sf$r),by=list(sub.sf$cluster),mean)
+
+sub.sf.ag<-sub.sf %>%
+  group_by(cluster,thresh) %>%
+  summarise(r =mean(abs(r),na.rm=TRUE))
+
+sub.sf.ag<-na.omit(sub.sf.ag)
+
+ggplot(data=sub.sf.ag, aes(x=thresh, y=r, color=cluster)) +
+  geom_line()
+
+
+#Look in 5 mm increments
+sub.sf.ag.5<-sub.sf.ag[sub.sf.ag$thresh %in% c(20,25,30,35,40),]
+ggplot(data=sub.sf.ag.5, aes(x=thresh, y=r, color=cluster)) +
+  geom_line()
+
+
+sub.sf.5 <-sub.sf[sub.sf$thresh %in% c(20,25,30,35,40),]
+sub.sf.5$sig<-as.numeric(sub.sf.5$p<0.05)
+
+sigfig<-sub.sf.5 %>%
+  group_by(cluster,thresh) %>%
+  summarise(sig =sum(sig))
+
+sigfig<-na.omit(sigfig)
+ggplot(data=sigfig, aes(x=thresh, y=sig, color=cluster)) +
+  geom_line(size=1) + ylab("Number significant correlations") + xlab("Extreme event threshold (mm)") + theme_classic() +
+  labs(color = "") + scale_color_manual(values = c("light blue","goldenrod")) +geom_point()
+
+```
+
